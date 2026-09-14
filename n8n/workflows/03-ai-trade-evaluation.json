@@ -1,0 +1,349 @@
+{
+  "name": "03 - AI Trade Evaluation",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 3 · AI Trade Evaluation\n\nThe model reviews a candidate the quant layer already built. It can **confirm or veto** — nothing else.\n\n`/ai/evaluate` validates the reply against a strict schema (unparseable ⇒ HOLD), caps the model's confidence at the deterministic confidence, refuses a direction flip, and returns a risk proposal only when the review passed.\n\nStops, targets and size never come from the model.",
+        "height": 320,
+        "width": 420,
+        "color": 4
+      },
+      "id": "0afd4b54-41d4-5791-87dd-561b07c69d05",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "ai-evaluation",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "b8e20e42-5822-5bbf-9220-51efef473ec3",
+      "name": "Trade candidate received",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        140
+      ],
+      "webhookId": "57022b1e-3eee-523a-a871-77f8af7476c9",
+      "notes": "POST /webhook/ai-evaluation",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Reject calls that do not carry the shared internal secret. These webhooks are\n// reachable from anywhere n8n is reachable, so an unauthenticated caller must not\n// be able to push a trade into the pipeline.\nconst expected = ($env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret');\nconst items = $input.all();\nconst out = [];\nfor (const item of items) {\n  const headers = item.json.headers || {};\n  const supplied = headers['x-workflow-secret'] || headers['X-Workflow-Secret'];\n  if (!supplied || supplied !== expected) {\n    throw new Error('unauthorized: missing or invalid x-workflow-secret header');\n  }\n  const body = item.json.body || item.json;\n  if (!body.symbol) { throw new Error('symbol is required'); }\n  out.push({ json: body });\n}\nreturn out;\n"
+      },
+      "id": "5449013a-f1b9-5057-8cc6-862d169ebd87",
+      "name": "Validate request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        140
+      ],
+      "notes": "Shared-secret check on the inbound webhook",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/ai/evaluate",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ symbol: $json.symbol, timeframe: $json.timeframe || null }) }}"
+      },
+      "id": "39a1fa38-09cd-5327-a84b-977d96ecee9c",
+      "name": "Call AI evaluation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        140
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "Provider is configured server-side (ollama / openai / anthropic)",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Defence in depth: the service already validates the model's JSON, but the\n// workflow re-checks the shape it depends on before acting on it.\nconst data = $input.first().json;\nconst allowed = ['BUY', 'SELL', 'HOLD'];\nconst decision = data.decision?.decision ?? null;\nconst confidence = data.decision?.confidence ?? null;\n\nconst problems = [];\nif (!data.evaluated) problems.push(data.reason || 'not evaluated');\nif (data.evaluated && !allowed.includes(decision)) problems.push(`bad decision: ${decision}`);\nif (data.evaluated && (typeof confidence !== 'number' || confidence < 0 || confidence > 1)) {\n  problems.push(`bad confidence: ${confidence}`);\n}\nif (data.parse_ok === false) problems.push(`parse failure: ${data.parse_error}`);\n\nreturn [{ json: {\n  symbol: data.candidate?.symbol ?? null,\n  evaluated: Boolean(data.evaluated),\n  actionable: Boolean(data.actionable) && problems.length === 0,\n  decision,\n  confidence,\n  reason: data.decision?.reason ?? data.reason ?? null,\n  risk_assessment: data.decision?.risk_assessment ?? null,\n  violations: data.violations || [],\n  problems,\n  risk_proposal: data.risk_proposal ?? null,\n  decision_id: data.decision_id ?? null,\n} }];\n"
+      },
+      "id": "b479d461-5e87-5521-8613-d7183002bfb9",
+      "name": "Validate AI response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "actionable",
+              "leftValue": "={{ $json.actionable }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "proposal",
+              "leftValue": "={{ $json.risk_proposal }}",
+              "rightValue": "",
+              "operator": {
+                "type": "object",
+                "operation": "exists",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "5cd6263a-dbdd-52ce-a170-2ed41b63dc74",
+      "name": "Actionable after review?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        960,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL || 'http://localhost:5678/' }}webhook/risk-validation",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-workflow-secret",
+              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret' }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ proposal: $json.risk_proposal, decision_id: $json.decision_id, source: 'workflow-03' }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "c86f1d16-0669-5f40-86d5-0e68d4e4e1c5",
+      "name": "Send to risk engine",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1200,
+        60
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Risk engine has the final say",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const data = $input.first().json;\nreturn [{ json: {\n  outcome: 'no_trade',\n  symbol: data.symbol,\n  decision: data.decision,\n  confidence: data.confidence,\n  reason: data.reason,\n  problems: data.problems,\n  violations: data.violations,\n  at: new Date().toISOString(),\n} }];\n"
+      },
+      "id": "e5081cf5-5165-5715-9f1a-d8aa3d4819a1",
+      "name": "Record AI veto",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        240
+      ],
+      "notes": "A veto is a normal, successful outcome",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/workflow/error",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({workflow: $workflow.name, message: 'AI evaluation request failed: ' + ($json.error?.message || 'unknown error'), node: $json.node || null, execution_id: $execution.id, severity: 'WARNING', halt_bot: false, context: { error: $json.error || null } }) }}"
+      },
+      "id": "8b2a1f05-1b66-56bc-868d-4c05c47a826e",
+      "name": "Report AI failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        340
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "notes": "Failures are recorded server-side and surfaced on the dashboard",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {},
+      "id": "4c62e288-3205-5e6e-8688-2aae31359cce",
+      "name": "No trade (AI unavailable)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        960,
+        340
+      ],
+      "notes": "Fails closed: no AI answer means no entry",
+      "notesInFlow": true
+    }
+  ],
+  "connections": {
+    "Trade candidate received": {
+      "main": [
+        [
+          {
+            "node": "Validate request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate request": {
+      "main": [
+        [
+          {
+            "node": "Call AI evaluation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call AI evaluation": {
+      "main": [
+        [
+          {
+            "node": "Validate AI response",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report AI failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate AI response": {
+      "main": [
+        [
+          {
+            "node": "Actionable after review?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Actionable after review?": {
+      "main": [
+        [
+          {
+            "node": "Send to risk engine",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record AI veto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report AI failure": {
+      "main": [
+        [
+          {
+            "node": "No trade (AI unavailable)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "timezone": "UTC",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [
+    {
+      "name": "trading"
+    }
+  ],
+  "meta": {
+    "description": "LLM review of a trade candidate, strictly validated."
+  },
+  "versionId": "7fc16e06-a73f-510b-9e81-d935cf2a5c14"
+}

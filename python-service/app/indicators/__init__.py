@@ -15,6 +15,7 @@ from app.indicators.structure import (
 )
 from app.indicators.trend import (
     adx,
+    efficiency_ratio,
     ema,
     macd,
     sma,
@@ -49,6 +50,7 @@ __all__ = [
     "breakouts",
     "consecutive_closes",
     "donchian",
+    "efficiency_ratio",
     "ema",
     "find_pivots",
     "keltner_channels",

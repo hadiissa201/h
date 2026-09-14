@@ -1,0 +1,408 @@
+{
+  "name": "05 - Trade Execution",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 5 · Trade Execution\n\nPlaces the order the risk engine approved.\n\n`/paper/order` refuses anything without a valid, unconsumed, unexpired approval whose fingerprint matches the order, so this workflow cannot execute an unapproved trade even if it is called directly.\n\nRetries are safe: the request is idempotent on `client_order_id`, so a retried node returns the original position instead of opening a second one.",
+        "height": 320,
+        "width": 420,
+        "color": 4
+      },
+      "id": "32d35d8f-8dde-5e7d-9a09-48d5934f5523",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "trade-execution",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "d2fef243-7fc5-5f3b-9e69-24c853aedaeb",
+      "name": "Approved trade received",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        140
+      ],
+      "webhookId": "8b63ffec-58cd-5cca-8170-123a178cbf3c",
+      "notes": "POST /webhook/trade-execution",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Reject calls that do not carry the shared internal secret. These webhooks are\n// reachable from anywhere n8n is reachable, so an unauthenticated caller must not\n// be able to push a trade into the pipeline.\nconst expected = ($env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret');\nconst items = $input.all();\nconst out = [];\nfor (const item of items) {\n  const headers = item.json.headers || {};\n  const supplied = headers['x-workflow-secret'] || headers['X-Workflow-Secret'];\n  if (!supplied || supplied !== expected) {\n    throw new Error('unauthorized: missing or invalid x-workflow-secret header');\n  }\n  const body = item.json.body || item.json;\n  if (!body.risk_approval_id) { throw new Error('risk_approval_id is required — execution needs an approval'); }\n  out.push({ json: body });\n}\nreturn out;\n"
+      },
+      "id": "37c8abe4-d457-5bf7-9346-31f66176c1cb",
+      "name": "Validate request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        140
+      ],
+      "notes": "Shared-secret check on the inbound webhook",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/paper/order",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 60000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ risk_approval_id: $json.risk_approval_id, symbol: $json.symbol || null }) }}"
+      },
+      "id": "10185ec6-7ff4-52d7-95eb-c4d099e492e7",
+      "name": "Place order",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        140
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput",
+      "notes": "Idempotent on client_order_id — retry is safe",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}=/positions/{{ $json.position.position_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "id": "9ae04eb8-9acf-5385-b93b-842846da99a4",
+      "name": "Verify position",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        60
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "notes": "Confirm the position exists as reported",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/portfolio",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "51d2885d-0f9c-5222-955b-deef482fe596",
+      "name": "Refresh portfolio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        960,
+        60
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const portfolio = $input.first().json;\nconst order = $('Place order').first().json;\nreturn [{ json: {\n  outcome: 'executed',\n  symbol: order.position.symbol,\n  position_id: order.position.position_id,\n  order_id: order.order.order_id,\n  status: order.order.status,\n  quantity: order.order.filled_quantity,\n  entry_price: order.order.average_fill_price,\n  stop_loss: order.position.stop_loss,\n  take_profit: order.position.take_profit,\n  fee: order.order.fee_paid,\n  mode: order.mode,\n  equity_after: portfolio.equity,\n  open_positions: portfolio.open_positions,\n  at: new Date().toISOString(),\n} }];\n"
+      },
+      "id": "dea36005-7c5d-50f2-bfbb-ae9ba29e06aa",
+      "name": "Execution summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "notify",
+              "leftValue": "={{ $env.NOTIFY_WEBHOOK_URL }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "a3164273-e948-5026-a5c1-2900fe14b6eb",
+      "name": "Notify configured?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1440,
+        60
+      ],
+      "notes": "Skips silently when no notification channel is configured",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.NOTIFY_WEBHOOK_URL }}",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: `[${$json.mode.toUpperCase()}] OPENED ${$json.symbol} qty ${$json.quantity} @ ${$json.entry_price} | stop ${$json.stop_loss} target ${$json.take_profit} | equity ${$json.equity_after}` }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "5b8703d1-0896-5706-a913-31e1e1292398",
+      "name": "Send trade notification",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1680,
+        -20
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Set NOTIFY_WEBHOOK_URL to a Slack/Discord/Teams incoming webhook",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {},
+      "id": "c02a3c71-41eb-5da4-939a-b8efe9eac7d1",
+      "name": "Execution recorded",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1680,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/workflow/error",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({workflow: $workflow.name, message: 'order placement failed: ' + ($json.error?.message || 'unknown error'), node: $json.node || null, execution_id: $execution.id, severity: 'ERROR', halt_bot: false, context: { error: $json.error || null } }) }}"
+      },
+      "id": "133d46b1-92a4-50ca-8b53-cc247632902f",
+      "name": "Report execution failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "notes": "Failures are recorded server-side and surfaced on the dashboard",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {},
+      "id": "4aee3b28-3709-5e18-96f8-69deaeb22235",
+      "name": "Execution failed",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        960,
+        300
+      ],
+      "notes": "Repeated failures trip the kill switch server-side",
+      "notesInFlow": true
+    }
+  ],
+  "connections": {
+    "Approved trade received": {
+      "main": [
+        [
+          {
+            "node": "Validate request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate request": {
+      "main": [
+        [
+          {
+            "node": "Place order",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Place order": {
+      "main": [
+        [
+          {
+            "node": "Verify position",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report execution failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify position": {
+      "main": [
+        [
+          {
+            "node": "Refresh portfolio",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Refresh portfolio": {
+      "main": [
+        [
+          {
+            "node": "Execution summary",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Execution summary": {
+      "main": [
+        [
+          {
+            "node": "Notify configured?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify configured?": {
+      "main": [
+        [
+          {
+            "node": "Send trade notification",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Execution recorded",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report execution failure": {
+      "main": [
+        [
+          {
+            "node": "Execution failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "timezone": "UTC",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [
+    {
+      "name": "trading"
+    }
+  ],
+  "meta": {
+    "description": "Approved-trade execution with verification."
+  },
+  "versionId": "ec7a2163-2f8f-5b4f-881b-f3261a6b395e"
+}

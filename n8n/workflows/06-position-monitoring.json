@@ -1,0 +1,482 @@
+{
+  "name": "06 - Position Monitoring",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 6 · Position Monitoring\n\nRuns often. Each pass marks positions, fills resting orders, moves break-even and trailing stops, and exits where the rules say so — using the **same exit rules the backtester uses**.\n\nIt also reports stale data and abnormal moves, and runs the kill-switch checks.\n\nA monitoring failure is treated as unsafe: it halts the bot rather than leaving positions unwatched.",
+        "height": 320,
+        "width": 420,
+        "color": 4
+      },
+      "id": "3146a572-6b98-565b-a67d-600c1a3a6f87",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 1
+            }
+          ]
+        }
+      },
+      "id": "6a0873cc-6a2a-5b10-bd62-4a401d30dbd5",
+      "name": "Every minute",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        140
+      ],
+      "notes": "Polling granularity — see the docs on intrabar gaps",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/positions/monitor",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "6b249615-6e74-5b35-9ef6-a30f0c2a7c43",
+      "name": "Monitor positions",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        240,
+        140
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "mark → resting orders → stops → exits → safety checks",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "emg",
+              "leftValue": "={{ ($json.emergency_triggers || []).length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            },
+            {
+              "id": "halted",
+              "leftValue": "={{ $json.bot_status }}",
+              "rightValue": "RUNNING",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "2c477535-39f5-56e2-8aa4-22996cdb48a7",
+      "name": "Emergency or halted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        480,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL || 'http://localhost:5678/' }}webhook/emergency-shutdown",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-workflow-secret",
+              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret' }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ reason: $json.emergency_triggers?.[0]?.reason || 'BOT_HALTED', detail: $json.emergency_triggers?.[0]?.detail || ('monitor reported status ' + $json.bot_status), source: 'workflow-06' }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "a30d5d7f-35cc-5cea-acff-ab2d3a302c26",
+      "name": "Trigger emergency workflow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        20
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "exits",
+              "leftValue": "={{ ($json.exits || []).length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            },
+            {
+              "id": "stops",
+              "leftValue": "={{ ($json.stop_updates || []).length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            },
+            {
+              "id": "stale",
+              "leftValue": "={{ ($json.stale_symbols || []).length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "or"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "ce929566-b82a-5ed0-bb17-ae25ed5f301e",
+      "name": "Anything happened?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        720,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const data = $input.first().json;\nconst exits = (data.exits || []).map((e) => `${e.symbol} ${e.reason} pnl=${e.realized_pnl}`);\nconst stops = (data.stop_updates || []).map((s) => `${s.symbol}: ${s.change}`);\nreturn [{ json: {\n  checked: data.checked,\n  exits,\n  stops,\n  stale_symbols: data.stale_symbols || [],\n  errors: data.errors || [],\n  equity: data.equity,\n  drawdown_pct: data.drawdown_pct,\n  daily_pnl_pct: data.daily_pnl_pct,\n  headline: [\n    exits.length ? `${exits.length} exit(s): ${exits.join('; ')}` : null,\n    stops.length ? `${stops.length} stop update(s)` : null,\n    (data.stale_symbols || []).length ? `stale data: ${data.stale_symbols.join(',')}` : null,\n  ].filter(Boolean).join(' | '),\n} }];\n"
+      },
+      "id": "cc1e0def-2473-57ca-bdcd-aabae3192039",
+      "name": "Summarise activity",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "notify",
+              "leftValue": "={{ $env.NOTIFY_WEBHOOK_URL }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "3f0a981a-2b7d-5ef8-afa4-1038190b9fa6",
+      "name": "Notify configured?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1200,
+        160
+      ],
+      "notes": "Skips silently when no notification channel is configured",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.NOTIFY_WEBHOOK_URL }}",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: `[MONITOR] ${$json.headline} | equity ${$json.equity} | dd ${($json.drawdown_pct * 100).toFixed(2)}%` }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "c4254796-ef2a-50df-a548-0142010a20b5",
+      "name": "Send position update",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1440,
+        100
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Set NOTIFY_WEBHOOK_URL to a Slack/Discord/Teams incoming webhook",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {},
+      "id": "d02b5be3-54dd-56ec-9b92-4f5df7bbbd00",
+      "name": "Nothing to report",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        960,
+        320
+      ],
+      "notes": "The usual outcome",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/workflow/error",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({workflow: $workflow.name, message: 'position monitoring failed: ' + ($json.error?.message || 'unknown error'), node: $json.node || null, execution_id: $execution.id, severity: 'CRITICAL', halt_bot: true, context: { error: $json.error || null } }) }}"
+      },
+      "id": "2a20174a-c37e-5ee3-88d2-917f93579103",
+      "name": "Report monitoring failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        340
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "notes": "Failures are recorded server-side and surfaced on the dashboard",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL || 'http://localhost:5678/' }}webhook/emergency-shutdown",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-workflow-secret",
+              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret' }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ reason: 'EXCHANGE_FAILURE', detail: 'position monitoring failed — positions are unwatched', source: 'workflow-06' }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "9ff1caf8-3562-5b7d-a9da-05b659081ea2",
+      "name": "Escalate monitoring failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        420
+      ],
+      "onError": "continueRegularOutput"
+    }
+  ],
+  "connections": {
+    "Every minute": {
+      "main": [
+        [
+          {
+            "node": "Monitor positions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Monitor positions": {
+      "main": [
+        [
+          {
+            "node": "Emergency or halted?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report monitoring failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Emergency or halted?": {
+      "main": [
+        [
+          {
+            "node": "Trigger emergency workflow",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Anything happened?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Anything happened?": {
+      "main": [
+        [
+          {
+            "node": "Summarise activity",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Nothing to report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarise activity": {
+      "main": [
+        [
+          {
+            "node": "Notify configured?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify configured?": {
+      "main": [
+        [
+          {
+            "node": "Send position update",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Nothing to report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report monitoring failure": {
+      "main": [
+        [
+          {
+            "node": "Escalate monitoring failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "timezone": "UTC",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [
+    {
+      "name": "trading"
+    }
+  ],
+  "meta": {
+    "description": "Scheduled position management and exit execution."
+  },
+  "versionId": "352d88d5-235a-55ab-b1ba-a90a2c2a2f21"
+}

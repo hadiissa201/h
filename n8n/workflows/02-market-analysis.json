@@ -1,0 +1,410 @@
+{
+  "name": "02 - Market Analysis",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 2 · Market Analysis\n\nFor each symbol: features → regime → strategies → trade candidate.\n\nThe LLM is **not** called here. `/strategy/evaluate` returns `should_call_ai`, which is only true when a real setup exists, the data is clean, the bot is running and the symbol is not already held. That gate is what keeps LLM cost and latency bounded.",
+        "height": 300,
+        "width": 420,
+        "color": 4
+      },
+      "id": "5620e878-b2a8-5db4-bbf5-e3aa5f274661",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "market-analysis",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "ab9a5005-ad12-5255-8d74-b9249b93186b",
+      "name": "From data collection",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        40
+      ],
+      "webhookId": "2a3f3c77-7886-5d39-b8c8-3f564c13bfff",
+      "notes": "POST /webhook/market-analysis",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "4ee8b5d1-a9c6-545c-8050-663621ecefd4",
+      "name": "Every 15 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        220
+      ],
+      "notes": "Independent safety net if workflow 01 is paused",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const expected = ($env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret');\nconst first = $input.first()?.json ?? {};\nif (first.headers) {\n  const supplied = first.headers['x-workflow-secret'] || first.headers['X-Workflow-Secret'];\n  if (!supplied || supplied !== expected) {\n    throw new Error('unauthorized: missing or invalid x-workflow-secret header');\n  }\n}\n\n// Symbols come from the caller, or fall back to the configured universe.\nconst configured = ($env.TRADING_SYMBOLS || 'BTC/USDT,ETH/USDT,SOL/USDT')\n  .split(',').map((s) => s.trim()).filter(Boolean);\nconst first = $input.first()?.json ?? {};\nconst body = first.body || first;\nconst symbols = Array.isArray(body.symbols) && body.symbols.length ? body.symbols : configured;\nconst timeframe = body.timeframe || $env.PRIMARY_TIMEFRAME || '1h';\nreturn symbols.map((symbol) => ({ json: { symbol, timeframe } }));\n"
+      },
+      "id": "bb4955d2-5605-5287-bfac-cd8a65a94284",
+      "name": "Resolve symbols",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "9e0186b5-a6ee-51b7-bdb8-c30cd674f1fb",
+      "name": "For each symbol",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        480,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/strategy/evaluate",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 60000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ symbol: $json.symbol, timeframe: $json.timeframe }) }}"
+      },
+      "id": "8d19d060-5093-50eb-b574-c2e05d7d66f5",
+      "name": "Evaluate strategies",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        200
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "features → regime → strategies → candidate",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "setup",
+              "leftValue": "={{ $json.has_setup }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            },
+            {
+              "id": "gate",
+              "leftValue": "={{ $json.should_call_ai }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "d4188db4-c50a-5e96-9427-bdc7a9ab0e54",
+      "name": "Setup worth AI review?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        960,
+        180
+      ],
+      "notes": "Both must hold before we spend an LLM call",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL || 'http://localhost:5678/' }}webhook/ai-evaluation",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-workflow-secret",
+              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret' }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ symbol: $json.symbol, timeframe: $json.timeframe, candidate_id: $json.candidate?.candidate_id ?? null, source: 'workflow-02' }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "7c72b9c0-aa9b-5661-a99d-ee2af7097f14",
+      "name": "Request AI evaluation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1200,
+        100
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const data = $input.first().json;\nreturn [{ json: {\n  symbol: data.symbol,\n  timeframe: data.timeframe,\n  regime: data.regime?.regime ?? null,\n  has_setup: data.has_setup,\n  skip_reason: data.skip_reason,\n  signals: (data.signals || []).map((s) => `${s.strategy}:${s.signal}@${s.confidence}`),\n} }];\n"
+      },
+      "id": "866a8c6d-c9d4-5244-a765-1b2f7fe6f337",
+      "name": "Record no-setup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1200,
+        280
+      ],
+      "notes": "Most passes end here — that is the system working",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/workflow/error",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({workflow: $workflow.name, message: 'strategy evaluation failed: ' + ($json.error?.message || 'unknown error'), node: $json.node || null, execution_id: $execution.id, severity: 'ERROR', halt_bot: false, context: { error: $json.error || null } }) }}"
+      },
+      "id": "dfdce164-a47f-517e-9d4e-d2fc6719ec18",
+      "name": "Report analysis failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        960,
+        380
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "notes": "Failures are recorded server-side and surfaced on the dashboard",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const results = $input.all().map((item) => item.json);\nreturn [{ json: {\n  evaluated: results.length,\n  setups: results.filter((r) => r.has_setup).length,\n  symbols: results.map((r) => r.symbol),\n  finished_at: new Date().toISOString(),\n} }];\n"
+      },
+      "id": "3d2853c2-3e1d-5f16-9bb1-bbff7aeb5e5e",
+      "name": "Summarise pass",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        20
+      ]
+    }
+  ],
+  "connections": {
+    "From data collection": {
+      "main": [
+        [
+          {
+            "node": "Resolve symbols",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Every 15 minutes": {
+      "main": [
+        [
+          {
+            "node": "Resolve symbols",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Resolve symbols": {
+      "main": [
+        [
+          {
+            "node": "For each symbol",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "For each symbol": {
+      "main": [
+        [
+          {
+            "node": "Summarise pass",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Evaluate strategies",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Evaluate strategies": {
+      "main": [
+        [
+          {
+            "node": "Setup worth AI review?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report analysis failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Setup worth AI review?": {
+      "main": [
+        [
+          {
+            "node": "Request AI evaluation",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record no-setup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Request AI evaluation": {
+      "main": [
+        [
+          {
+            "node": "For each symbol",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record no-setup": {
+      "main": [
+        [
+          {
+            "node": "For each symbol",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report analysis failure": {
+      "main": [
+        [
+          {
+            "node": "For each symbol",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "timezone": "UTC",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [
+    {
+      "name": "trading"
+    }
+  ],
+  "meta": {
+    "description": "Per-symbol quantitative analysis and AI gating."
+  },
+  "versionId": "06a860d3-f568-55c5-91bd-8f0d1b9a71b5"
+}

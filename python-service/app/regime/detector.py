@@ -36,6 +36,10 @@ class RegimeConfig(BaseModel):
     adx_strong_trend_min: float = Field(default=28.0)
     di_spread_min: float = Field(default=5.0)
     slope_min: float = Field(default=0.0005)
+    # Kaufman efficiency floors. Below `efficiency_min_trend` the market has not
+    # gone anywhere, whatever ADX says, so no trend label is allowed.
+    efficiency_min_trend: float = Field(default=0.12)
+    efficiency_min_strong: float = Field(default=0.25)
     vol_rank_high: float = Field(default=0.85)
     vol_rank_extreme: float = Field(default=0.97)
     vol_rank_low: float = Field(default=0.15)
@@ -71,6 +75,7 @@ class RegimeDetector:
         vol_ratio = row.get("vol_ratio")
         bb_width = row.get("bb_width")
         structure = row.get("structure")
+        efficiency = row.get("efficiency_ratio")
         stack_bull = row.get("ema_stack_bull")
         stack_bear = row.get("ema_stack_bear")
         price_vs_trend = row.get("price_vs_ema_trend")
@@ -88,6 +93,7 @@ class RegimeDetector:
             di_spread=di_spread,
             ema_alignment=(stack_bull or 0.0) - (stack_bear or 0.0),
             trend_slope=slope,
+            efficiency_ratio=efficiency,
             atr_pct=atr_pct,
             atr_pct_rank=atr_rank,
             vol_ratio=vol_ratio,
@@ -96,8 +102,20 @@ class RegimeDetector:
             last_bar_move_pct=last_move,
         )
 
-        # --- missing features => UNKNOWN, never a tradeable regime
-        required = (adx, di_spread, atr_pct, slope)
+        # --- missing features => UNKNOWN, never a tradeable regime.
+        # Every input the classifier reads must be present: classifying on a
+        # half-warm feature row silently treats NaN as "neutral".
+        required = (
+            adx,
+            di_spread,
+            atr_pct,
+            slope,
+            efficiency,
+            stack_bull,
+            stack_bear,
+            price_vs_trend,
+            atr_rank,
+        )
         if any(value is None for value in required):
             missing = features.missing_features(index)
             return RegimeAssessment(
@@ -145,6 +163,7 @@ class RegimeDetector:
             adx=adx,
             di_spread=di_spread,
             slope=slope,
+            efficiency=efficiency,
             stack_bull=bool(stack_bull),
             stack_bear=bool(stack_bear),
             structure=structure,
@@ -231,12 +250,20 @@ class RegimeDetector:
         adx: float,
         di_spread: float,
         slope: float,
+        efficiency: float,
         stack_bull: bool,
         stack_bear: bool,
         structure: float | None,
         price_vs_trend: float | None,
     ) -> tuple[TrendState, float]:
         cfg = self.config
+
+        # A market that has travelled a long way and ended where it started is a
+        # range, however strong ADX looks. This veto comes first because ADX can
+        # read 100 on an oscillation, and on a frozen market.
+        if efficiency < cfg.efficiency_min_trend:
+            return TrendState.FLAT, 0.0
+
         bullish_votes = sum(
             (
                 di_spread > cfg.di_spread_min,
@@ -261,9 +288,16 @@ class RegimeDetector:
 
         direction_up = bullish_votes > bearish_votes
         votes = bullish_votes if direction_up else bearish_votes
-        strong = adx >= cfg.adx_strong_trend_min and votes >= 4
-        # 0..1 strength blending trend quality (ADX) with breadth of agreement.
-        strength = min(1.0, (adx / 50.0) * 0.5 + (votes / 5.0) * 0.5)
+        strong = (
+            adx >= cfg.adx_strong_trend_min
+            and votes >= 4
+            and efficiency >= cfg.efficiency_min_strong
+        )
+        # 0..1 strength blending trend quality (ADX), breadth of agreement and
+        # how directly the market actually travelled.
+        strength = min(
+            1.0, (adx / 50.0) * 0.4 + (votes / 5.0) * 0.4 + min(efficiency, 1.0) * 0.2
+        )
 
         if direction_up:
             return (TrendState.STRONG_UP if strong else TrendState.WEAK_UP), strength

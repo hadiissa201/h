@@ -17,6 +17,7 @@ import pandas as pd
 from app.features.config import FeatureConfig
 from app.indicators import (
     adx,
+    efficiency_ratio,
     atr,
     atr_pct,
     bollinger_bands,
@@ -81,6 +82,7 @@ def _trend_block(
     out = out.join(adx_frame)
     out["di_spread"] = adx_frame["plus_di"] - adx_frame["minus_di"]
     out["trend_slope"] = slope(close, cfg.slope_period)
+    out["efficiency_ratio"] = efficiency_ratio(close, cfg.efficiency_period)
     return out
 
 

@@ -25,6 +25,7 @@ class RegimeMetrics(BaseModel):
     di_spread: float | None = None
     ema_alignment: float | None = None
     trend_slope: float | None = None
+    efficiency_ratio: float | None = None
     atr_pct: float | None = None
     atr_pct_rank: float | None = None
     vol_ratio: float | None = None

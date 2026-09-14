@@ -66,17 +66,33 @@ def adx(
     close: pd.Series,
     period: int = 14,
 ) -> pd.DataFrame:
-    """Average Directional Index with +DI / -DI, Wilder's original method."""
+    """Average Directional Index with +DI / -DI, Wilder's original method.
+
+    Two guards that matter on real feeds: directional movement below a
+    price-scaled epsilon is treated as zero (floating-point dust must not count
+    as direction), and a zero +DI/-DI sum yields NaN rather than a fabricated
+    reading.
+
+    Known property, not a defect: Wilder smoothing keeps a single directional
+    move alive indefinitely, so one move followed by frozen highs/lows pins ADX
+    at 100 — the strongest trend reading possible on a market that is not moving.
+    Never gate a trade on ADX alone; the regime layer requires agreement from
+    DI spread, slope, EMA stack and market structure for exactly this reason.
+    """
     _check_period(period)
     up_move = high.diff()
     down_move = -low.diff()
 
+    # Scale-aware dust threshold: 1e-10 of the typical price level.
+    scale = float(np.nanmean(np.abs(high.to_numpy(dtype=float)))) if len(high) else 0.0
+    epsilon = max(scale * 1e-10, np.finfo(float).eps)
+
     plus_dm = pd.Series(
-        np.where((up_move > down_move) & (up_move > 0), up_move, 0.0),
+        np.where((up_move > down_move) & (up_move > epsilon), up_move, 0.0),
         index=high.index,
     )
     minus_dm = pd.Series(
-        np.where((down_move > up_move) & (down_move > 0), down_move, 0.0),
+        np.where((down_move > up_move) & (down_move > epsilon), down_move, 0.0),
         index=high.index,
     )
 
@@ -84,7 +100,12 @@ def adx(
     with np.errstate(divide="ignore", invalid="ignore"):
         plus_di = 100.0 * wilder_ema(plus_dm, period) / atr_
         minus_di = 100.0 * wilder_ema(minus_dm, period) / atr_
-        dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di)
+        directional_total = plus_di + minus_di
+        dx = (
+            100.0
+            * (plus_di - minus_di).abs()
+            / directional_total.where(directional_total > epsilon)
+        )
     dx = dx.replace([np.inf, -np.inf], np.nan)
     # Wilder smoothing of DX; pandas' ewm skips the warm-up NaNs so ADX only
     # becomes valid once `period` DX observations exist (~2*period bars in).
@@ -112,6 +133,22 @@ def slope(series: pd.Series, period: int = 20) -> pd.Series:
         return float(beta / y_mean)
 
     return series.rolling(window=period, min_periods=period).apply(_fit, raw=True)
+
+
+def efficiency_ratio(series: pd.Series, period: int = 20) -> pd.Series:
+    """Kaufman Efficiency Ratio: net movement divided by the path travelled.
+
+    The cheapest honest way to tell a trend from an oscillation. A clean trend
+    covers ground (ratio near 1); a market swinging between two prices travels a
+    long way and ends where it started (ratio near 0).
+
+    ADX cannot make this distinction on its own — a sine wave and a staircase can
+    both show a high ADX — which is why the regime layer requires both.
+    """
+    _check_period(period)
+    net = (series - series.shift(period)).abs()
+    path = series.diff().abs().rolling(period, min_periods=period).sum()
+    return net / path.replace(0.0, np.nan)
 
 
 def _check_period(period: int) -> None:

@@ -1,0 +1,450 @@
+{
+  "name": "01 - Market Data Collection",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 1 · Market Data Collection\n\nFetch → validate → store, then release the analysis stage **only if the data is clean**.\n\nValidation (gaps, duplicates, stale timestamps, invalid OHLC, missing volume) runs in the Python service; this workflow branches on its verdict.\n\nBad data routes to the safety check instead of to analysis — no trade is ever taken on data we do not trust.",
+        "height": 320,
+        "width": 420,
+        "color": 4
+      },
+      "id": "f52de486-723d-546e-9aaa-d01ba432257c",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "fe45ff32-0ca0-53c1-9c1b-227c7af20545",
+      "name": "Every 5 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        120
+      ],
+      "notes": "Match your fastest timeframe",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/market/collect",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 120000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ store_candles: true }) }}"
+      },
+      "id": "dc51329a-205c-5441-b0d2-6f298cc7a1ca",
+      "name": "Collect market data",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        220,
+        120
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 2,
+      "waitBetweenTries": 2000,
+      "onError": "continueErrorOutput",
+      "notes": "Fetches, validates and persists every symbol/timeframe",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "data_ok",
+              "leftValue": "={{ $json.all_data_ok }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "d7f587d9-34f8-5e81-8ba5-f720804a5f0f",
+      "name": "All data valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        460,
+        100
+      ],
+      "notes": "NO TRADE on bad data",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const data = $input.first().json;\nconst symbols = (data.symbols || []).map((s) => ({\n  symbol: s.symbol,\n  timeframes: Object.keys(s.timeframes || {}),\n  last_price: Object.values(s.timeframes || {})[0]?.last_price ?? null,\n}));\nreturn [{ json: { symbols: symbols.map((s) => s.symbol), detail: symbols, provider: data.provider } }];\n"
+      },
+      "id": "0dc0149c-ed2e-507a-82a1-7d384d138379",
+      "name": "Summarise good data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL || 'http://localhost:5678/' }}webhook/market-analysis",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-workflow-secret",
+              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret' }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ symbols: $json.symbols, source: 'workflow-01' }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "6d0a819a-f85e-5eac-82e3-70fa7f8ae73d",
+      "name": "Start market analysis",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        940,
+        20
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Hands off to workflow 02",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const data = $input.first().json;\nconst bad = [];\nfor (const entry of data.symbols || []) {\n  const issues = [];\n  for (const [timeframe, info] of Object.entries(entry.timeframes || {})) {\n    if (!info.data_ok) {\n      issues.push(`${timeframe}: ${(info.issues || []).map((i) => i.code).join(',')}`);\n    }\n  }\n  for (const error of entry.errors || []) {\n    issues.push(`${error.timeframe}: ${error.error}`);\n  }\n  if (issues.length) bad.push({ symbol: entry.symbol, issues });\n}\nreturn [{ json: { bad_symbols: bad.map((b) => b.symbol), detail: bad } }];\n"
+      },
+      "id": "8591be8d-85ff-57dd-8939-22a2f8a995c0",
+      "name": "Extract unusable symbols",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/risk/safety-check",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ auto_halt: true, stale_symbols: $json.bad_symbols }) }}"
+      },
+      "id": "8749fc25-6443-547b-a62a-e7d9db37d846",
+      "name": "Run safety check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        940,
+        220
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "notes": "Stale data is a kill-switch trigger",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "halted",
+              "leftValue": "={{ $json.halted }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "80fec010-2b61-5418-989f-83a4c27ed4aa",
+      "name": "Bot halted?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1180,
+        220
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL || 'http://localhost:5678/' }}webhook/emergency-shutdown",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-workflow-secret",
+              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret' }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ reason: 'MARKET_DATA_STALE', detail: 'data collection reported unusable market data', source: 'workflow-01' }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "27e837dc-5780-54f1-842f-b5f17051dcb0",
+      "name": "Escalate to emergency workflow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1420,
+        160
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "id": "b5973562-366e-5858-9419-de686dc26c28",
+      "name": "Analysis skipped (bad data)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1420,
+        300
+      ],
+      "notes": "Not halted, but no analysis this cycle",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/workflow/error",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({workflow: $workflow.name, message: 'market data collection request failed: ' + ($json.error?.message || 'unknown error'), node: $json.node || null, execution_id: $execution.id, severity: 'ERROR', halt_bot: false, context: { error: $json.error || null } }) }}"
+      },
+      "id": "d5e16326-26eb-5ff8-a4d2-672b17b33767",
+      "name": "Report collection failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        460,
+        300
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "notes": "Failures are recorded server-side and surfaced on the dashboard",
+      "notesInFlow": true
+    }
+  ],
+  "connections": {
+    "Every 5 minutes": {
+      "main": [
+        [
+          {
+            "node": "Collect market data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Collect market data": {
+      "main": [
+        [
+          {
+            "node": "All data valid?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report collection failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "All data valid?": {
+      "main": [
+        [
+          {
+            "node": "Summarise good data",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Extract unusable symbols",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Summarise good data": {
+      "main": [
+        [
+          {
+            "node": "Start market analysis",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract unusable symbols": {
+      "main": [
+        [
+          {
+            "node": "Run safety check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run safety check": {
+      "main": [
+        [
+          {
+            "node": "Bot halted?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Bot halted?": {
+      "main": [
+        [
+          {
+            "node": "Escalate to emergency workflow",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Analysis skipped (bad data)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "timezone": "UTC",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [
+    {
+      "name": "trading"
+    }
+  ],
+  "meta": {
+    "description": "Scheduled market data collection with validation gating."
+  },
+  "versionId": "3dc713ff-7408-5b45-9ae8-6400909b5a22"
+}

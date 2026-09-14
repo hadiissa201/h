@@ -24,6 +24,9 @@ class FeatureConfig(BaseModel):
     macd_signal: int = Field(default=9, ge=2)
     adx_period: int = Field(default=14, ge=2)
     slope_period: int = Field(default=20, ge=3)
+    # Long enough to span a typical range cycle: a 20-bar window sees a slow
+    # oscillation as a clean trend, which is exactly the error to avoid.
+    efficiency_period: int = Field(default=60, ge=10)
 
     # momentum
     rsi_period: int = Field(default=14, ge=2)
@@ -71,6 +74,7 @@ class FeatureConfig(BaseModel):
                 self.volume_ma_period,
                 self.donchian_period,
                 self.slope_period,
+                self.efficiency_period,
             )
             + self.pivot_left
             + self.pivot_right

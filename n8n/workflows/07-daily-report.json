@@ -1,0 +1,289 @@
+{
+  "name": "07 - Daily Performance Report",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 7 · Daily Report\n\nBuilt from **stored rows** — trades, equity snapshots, risk decisions, AI decisions. The model summarises those figures and is told not to invent any.\n\nThe report includes the honest AI assessment: whether model confidence has predicted anything, or whether the sample is still too small to say.",
+        "height": 280,
+        "width": 420,
+        "color": 4
+      },
+      "id": "ca50edbf-3998-595c-8c6d-eb156a4ae049",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 5 0 * * *"
+            }
+          ]
+        }
+      },
+      "id": "2cc86322-7446-5b02-b0cb-abbf0549335e",
+      "name": "Daily at 00:05 UTC",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        140
+      ],
+      "notes": "After the UTC day closes",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/reports/daily",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 180000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ day_offset: -1, include_ai_summary: true, persist: true }) }}"
+      },
+      "id": "c82cf7cb-14b0-584a-bb86-1dada5256bf9",
+      "name": "Generate daily report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        240,
+        140
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const report = $input.first().json;\nconst facts = report.facts || {};\nconst account = facts.account || {};\nconst metrics = facts.metrics || {};\nconst ai = facts.ai_decisions || {};\nconst lines = [\n  `Daily report ${report.period_start?.slice(0, 10)} (${facts.mode})`,\n  `Equity ${Number(account.equity).toFixed(2)} | day ${Number(account.daily_pnl).toFixed(2)} ` +\n    `(${(Number(account.daily_pnl_pct) * 100).toFixed(2)}%) | drawdown ` +\n    `${(Number(account.drawdown_pct) * 100).toFixed(2)}%`,\n  `Trades ${metrics.trades ?? 0} (W${metrics.wins ?? 0}/L${metrics.losses ?? 0}) ` +\n    `net ${Number(metrics.net_pnl ?? 0).toFixed(2)} fees ${Number(metrics.fees_paid ?? 0).toFixed(2)}`,\n  `Risk rejections: ${facts.risk_rejections_total ?? 0}`,\n  `AI: ${ai.total ?? 0} decisions (${ai.hold ?? 0} hold, ${ai.parse_failures ?? 0} parse failures)`,\n  `AI value: ${facts.ai_evaluation?.verdict ?? 'unknown'}`,\n  facts.bot_status !== 'RUNNING' ? `BOT STATUS: ${facts.bot_status} (${facts.halt_reason})` : null,\n  metrics.insufficient_data ? 'Sample too small for statistical claims.' : null,\n].filter(Boolean);\nreturn [{ json: {\n  report_id: report.report_id,\n  headline: lines.join('\\n'),\n  markdown: report.markdown,\n  bot_status: facts.bot_status,\n  trades: metrics.trades ?? 0,\n} }];\n"
+      },
+      "id": "a6b80c92-a38f-5831-801a-992a2c657ac0",
+      "name": "Format report",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "notify",
+              "leftValue": "={{ $env.NOTIFY_WEBHOOK_URL }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "9092b66b-1d43-55a2-94f9-85a6e777ce9d",
+      "name": "Notify configured?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        720,
+        140
+      ],
+      "notes": "Skips silently when no notification channel is configured",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.NOTIFY_WEBHOOK_URL }}",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.headline }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "d5f43fad-6018-5dd2-87ed-43da2a632ab8",
+      "name": "Send daily report",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        960,
+        60
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Set NOTIFY_WEBHOOK_URL to a Slack/Discord/Teams incoming webhook",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {},
+      "id": "226db8b6-0e5f-545f-994b-cf61f31dfd76",
+      "name": "Report stored",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        960,
+        220
+      ],
+      "notes": "Also available at GET /reports/daily/latest",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/workflow/error",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({workflow: $workflow.name, message: 'daily report generation failed: ' + ($json.error?.message || 'unknown error'), node: $json.node || null, execution_id: $execution.id, severity: 'WARNING', halt_bot: false, context: { error: $json.error || null } }) }}"
+      },
+      "id": "544ed10e-00dc-5a57-9ff2-5692332ef9ce",
+      "name": "Report generation failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        320
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "notes": "Failures are recorded server-side and surfaced on the dashboard",
+      "notesInFlow": true
+    }
+  ],
+  "connections": {
+    "Daily at 00:05 UTC": {
+      "main": [
+        [
+          {
+            "node": "Generate daily report",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate daily report": {
+      "main": [
+        [
+          {
+            "node": "Format report",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report generation failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format report": {
+      "main": [
+        [
+          {
+            "node": "Notify configured?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify configured?": {
+      "main": [
+        [
+          {
+            "node": "Send daily report",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report stored",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send daily report": {
+      "main": [
+        [
+          {
+            "node": "Report stored",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "timezone": "UTC",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [
+    {
+      "name": "trading"
+    }
+  ],
+  "meta": {
+    "description": "Daily performance report with an AI summary of stored data."
+  },
+  "versionId": "db8ad44f-507f-53c6-9627-89534803a23b"
+}

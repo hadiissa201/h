@@ -1,0 +1,481 @@
+{
+  "name": "08 - Emergency Shutdown",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 8 · Emergency Shutdown\n\nThree ways in: another workflow escalates, a human POSTs the webhook, or the 5-minute sweep finds a breach.\n\nHalting stops new entries and **requires a manual reset** (`POST /bot/reset` with `confirmation: \"RESET\"`). Automation cannot un-halt itself.\n\nOpen positions are left alone unless `EMERGENCY_FLATTEN=true`: forced liquidation into a disorderly market is often worse than a position that still has a stop.",
+        "height": 360,
+        "width": 420,
+        "color": 4
+      },
+      "id": "b5adb4ee-3b32-5a99-adf5-81b9512afb90",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -60
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "emergency-shutdown",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "c4d7f970-a84e-5960-a7cc-d4a6b92a23fb",
+      "name": "Emergency triggered",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        100
+      ],
+      "webhookId": "4a2512f8-6437-5f18-88b9-2eded4619910",
+      "notes": "POST /webhook/emergency-shutdown",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 5
+            }
+          ]
+        }
+      },
+      "id": "50122b96-4497-50cf-a05d-2d1d42961f6b",
+      "name": "Safety sweep every 5 minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.4,
+      "position": [
+        0,
+        300
+      ],
+      "notes": "Independent of any other workflow running",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const expected = ($env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret');\nconst first = $input.first()?.json ?? {};\nif (first.headers) {\n  const supplied = first.headers['x-workflow-secret'] || first.headers['X-Workflow-Secret'];\n  if (!supplied || supplied !== expected) {\n    throw new Error('unauthorized: missing or invalid x-workflow-secret header');\n  }\n}\n\nconst first = $input.first()?.json ?? {};\nconst body = first.body || first;\nreturn [{ json: {\n  reason: body.reason || 'MANUAL',\n  detail: body.detail || 'scheduled safety sweep',\n  source: body.source || 'workflow-08',\n  explicit: Boolean(body.reason),\n} }];\n"
+      },
+      "id": "7f1aa1ce-e9ff-565c-8e75-adf1a82b23da",
+      "name": "Normalise trigger",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/risk/safety-check",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ auto_halt: true }) }}"
+      },
+      "id": "70f018da-0c3b-5984-b0ae-26023b41bc59",
+      "name": "Run safety checks",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        200
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "notes": "Daily loss, drawdown, repeated order failures",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const checks = $input.first().json;\nconst trigger = $('Normalise trigger').first().json;\nconst triggered = checks.triggered || [];\nconst mustHalt = trigger.explicit || triggered.length > 0 || checks.halted;\nreturn [{ json: {\n  must_halt: mustHalt,\n  already_halted: Boolean(checks.halted),\n  bot_status: checks.bot_status,\n  reason: triggered[0]?.reason || trigger.reason,\n  detail: triggered[0]?.detail || trigger.detail,\n  source: trigger.source,\n  triggers: triggered,\n} }];\n"
+      },
+      "id": "8da808d7-771f-5701-b32d-c7e40fbb0da5",
+      "name": "Decide action",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "halt",
+              "leftValue": "={{ $json.must_halt }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "fbe59f7e-ddba-542d-a9be-636dba9e6d06",
+      "name": "Halt required?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        960,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/bot/halt",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 120000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ reason: $json.reason, detail: $json.detail, source: $json.source, close_positions: $env.EMERGENCY_FLATTEN === 'true' }) }}"
+      },
+      "id": "b24abc8f-5fb3-5b71-bead-03d1118e7697",
+      "name": "Halt the bot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1200,
+        100
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "notes": "close_positions is opt-in via EMERGENCY_FLATTEN",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/bot/state",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "544256d8-f8cc-59d4-ae8e-295146dd6688",
+      "name": "Confirm bot state",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1440,
+        100
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const state = $input.first().json;\nconst halt = $('Halt the bot').first().json;\nreturn [{ json: {\n  status: state.status,\n  reason: state.halt_reason,\n  detail: state.halt_detail,\n  halted_at: state.halted_at,\n  positions_closed: halt.positions_closed ?? 0,\n  requires_manual_reset: state.requires_manual_reset,\n  headline:\n    `TRADING HALTED: ${state.halt_reason} — ${state.halt_detail || ''} | ` +\n    `positions closed: ${halt.positions_closed ?? 0} | ` +\n    'manual reset required: POST /bot/reset {\"confirmation\":\"RESET\"}',\n} }];\n"
+      },
+      "id": "0435d1f4-0985-5533-b9d5-623d5011c447",
+      "name": "Build alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1680,
+        100
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "notify",
+              "leftValue": "={{ $env.NOTIFY_WEBHOOK_URL }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "ffe7fa5b-5533-581e-b2f6-4887f757f9a2",
+      "name": "Notify configured?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1920,
+        100
+      ],
+      "notes": "Skips silently when no notification channel is configured",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.NOTIFY_WEBHOOK_URL }}",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.headline }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "2f9681c8-9cee-5040-8340-70642f6a704b",
+      "name": "Send emergency alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        2160,
+        20
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Set NOTIFY_WEBHOOK_URL to a Slack/Discord/Teams incoming webhook",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {},
+      "id": "4c7ca49f-8cb3-577c-9eec-5866b9ca06d6",
+      "name": "HALTED — awaiting manual reset",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2160,
+        180
+      ],
+      "notes": "No workflow can clear this state",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {},
+      "id": "d65a4673-cee6-5631-90d0-6566d05e0328",
+      "name": "No action needed",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        320
+      ],
+      "notes": "All safety checks passed",
+      "notesInFlow": true
+    }
+  ],
+  "connections": {
+    "Emergency triggered": {
+      "main": [
+        [
+          {
+            "node": "Normalise trigger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Safety sweep every 5 minutes": {
+      "main": [
+        [
+          {
+            "node": "Normalise trigger",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalise trigger": {
+      "main": [
+        [
+          {
+            "node": "Run safety checks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Run safety checks": {
+      "main": [
+        [
+          {
+            "node": "Decide action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decide action": {
+      "main": [
+        [
+          {
+            "node": "Halt required?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Halt required?": {
+      "main": [
+        [
+          {
+            "node": "Halt the bot",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No action needed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Halt the bot": {
+      "main": [
+        [
+          {
+            "node": "Confirm bot state",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Confirm bot state": {
+      "main": [
+        [
+          {
+            "node": "Build alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build alert": {
+      "main": [
+        [
+          {
+            "node": "Notify configured?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify configured?": {
+      "main": [
+        [
+          {
+            "node": "Send emergency alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HALTED — awaiting manual reset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send emergency alert": {
+      "main": [
+        [
+          {
+            "node": "HALTED — awaiting manual reset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "timezone": "UTC",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [
+    {
+      "name": "trading"
+    }
+  ],
+  "meta": {
+    "description": "Kill switch: halt trading and require a manual reset."
+  },
+  "versionId": "77dbc99b-4495-5ca3-af06-0353e9e50de2"
+}

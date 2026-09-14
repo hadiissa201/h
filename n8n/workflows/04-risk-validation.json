@@ -1,0 +1,336 @@
+{
+  "name": "04 - Risk Validation",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 4 · Risk Validation\n\nThe deterministic gate. `/risk/check` re-resolves equity, exposure, drawdown, spread and liquidity **server-side** — values in the payload cannot inflate the account.\n\nIt checks exposure, position count, daily loss, drawdown, cooldown, confidence, reward/risk, spread, liquidity and the mandatory stop, then sizes the trade.\n\nOn approval it issues a **single-use approval id**. Execution is impossible without one.",
+        "height": 340,
+        "width": 420,
+        "color": 4
+      },
+      "id": "558151d8-d832-5a54-ba1d-02fa65487e41",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "risk-validation",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "8d22fd43-5a17-5ae3-919e-d0c3354e16a4",
+      "name": "Proposal received",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        0,
+        140
+      ],
+      "webhookId": "3c204960-978f-565f-9d00-36a87d0b6eb5",
+      "notes": "POST /webhook/risk-validation",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Reject calls that do not carry the shared internal secret. These webhooks are\n// reachable from anywhere n8n is reachable, so an unauthenticated caller must not\n// be able to push a trade into the pipeline.\nconst expected = ($env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret');\nconst items = $input.all();\nconst out = [];\nfor (const item of items) {\n  const headers = item.json.headers || {};\n  const supplied = headers['x-workflow-secret'] || headers['X-Workflow-Secret'];\n  if (!supplied || supplied !== expected) {\n    throw new Error('unauthorized: missing or invalid x-workflow-secret header');\n  }\n  const body = item.json.body || item.json;\n  if (!body.proposal) { throw new Error('proposal is required'); }\n  out.push({ json: body });\n}\nreturn out;\n"
+      },
+      "id": "c22ef572-934a-5333-87cb-b64f8d25ac31",
+      "name": "Validate request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        140
+      ],
+      "notes": "Shared-secret check on the inbound webhook",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/risk/check",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 60000
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.proposal) }}"
+      },
+      "id": "1c6be67d-7473-5a46-a087-b08be6f7d3d4",
+      "name": "Risk check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        140
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "onError": "continueErrorOutput",
+      "notes": "Deterministic. Same inputs ⇒ same verdict.",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "approved",
+              "leftValue": "={{ $json.decision }}",
+              "rightValue": "APPROVED",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "b6f06cb4-8d6c-5156-a67a-d05d5eac6fa6",
+      "name": "Approved?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        720,
+        140
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const decision = $input.first().json;\nif (!decision.approval_id) {\n  throw new Error('approved decision carried no approval_id — refusing to execute');\n}\nreturn [{ json: {\n  risk_approval_id: decision.approval_id,\n  symbol: decision.symbol,\n  direction: decision.direction,\n  quantity: decision.sizing?.quantity ?? null,\n  notional: decision.sizing?.notional ?? null,\n  risk_pct: decision.sizing?.effective_risk_pct ?? null,\n  expires_at: decision.expires_at,\n} }];\n"
+      },
+      "id": "695fcfd7-9886-53d0-a60c-8ed2d148013b",
+      "name": "Build execution request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL || 'http://localhost:5678/' }}webhook/trade-execution",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-workflow-secret",
+              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret' }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ risk_approval_id: $json.risk_approval_id, symbol: $json.symbol, source: 'workflow-04' }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "81426b28-4d6e-546e-84e0-3558b356517a",
+      "name": "Execute trade",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1200,
+        60
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const decision = $input.first().json;\nreturn [{ json: {\n  outcome: 'rejected',\n  symbol: decision.symbol,\n  direction: decision.direction,\n  codes: decision.rejection_codes || [],\n  reasons: decision.reasons || [],\n  failed_checks: (decision.checks || []).filter((c) => !c.passed).map((c) => c.name),\n  at: new Date().toISOString(),\n} }];\n"
+      },
+      "id": "55550353-8c71-57a4-be4f-2754708ec0e0",
+      "name": "Record rejection",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        960,
+        240
+      ],
+      "notes": "Rejections are logged server-side and shown on the dashboard",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/workflow/error",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({workflow: $workflow.name, message: 'risk check request failed: ' + ($json.error?.message || 'unknown error'), node: $json.node || null, execution_id: $execution.id, severity: 'CRITICAL', halt_bot: true, context: { error: $json.error || null } }) }}"
+      },
+      "id": "4be80119-a1e1-5344-8017-e94c299ae1de",
+      "name": "Report risk check failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        720,
+        340
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "notes": "Failures are recorded server-side and surfaced on the dashboard",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {},
+      "id": "47c8a422-4976-5cb5-9dd2-3b61f33f63e3",
+      "name": "No trade (risk engine unreachable)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        960,
+        420
+      ],
+      "notes": "If risk cannot be evaluated, nothing trades — and the bot halts",
+      "notesInFlow": true
+    }
+  ],
+  "connections": {
+    "Proposal received": {
+      "main": [
+        [
+          {
+            "node": "Validate request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate request": {
+      "main": [
+        [
+          {
+            "node": "Risk check",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Risk check": {
+      "main": [
+        [
+          {
+            "node": "Approved?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Report risk check failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approved?": {
+      "main": [
+        [
+          {
+            "node": "Build execution request",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Record rejection",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build execution request": {
+      "main": [
+        [
+          {
+            "node": "Execute trade",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Report risk check failure": {
+      "main": [
+        [
+          {
+            "node": "No trade (risk engine unreachable)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "timezone": "UTC",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [
+    {
+      "name": "trading"
+    }
+  ],
+  "meta": {
+    "description": "Deterministic risk validation and approval issuance."
+  },
+  "versionId": "b7cf04a0-b946-5979-8c82-4bda3d99ce17"
+}

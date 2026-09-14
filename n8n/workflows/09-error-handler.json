@@ -1,0 +1,335 @@
+{
+  "name": "09 - Error Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "content": "## 9 · Error Handler\n\nSet this workflow as the **Error Workflow** in every other workflow's settings (Settings → Error Workflow).\n\nIt records the failure server-side with workflow, node and execution id, and escalates to the emergency workflow when the failing stage means trading is no longer safe — execution and monitoring failures, not analysis ones.\n\nNo failure is swallowed.",
+        "height": 320,
+        "width": 420,
+        "color": 4
+      },
+      "id": "91c80c31-21ec-5acc-af65-f66232fa9c26",
+      "name": "About",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [
+        -460,
+        -40
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "c6050e56-a8b0-5481-b269-e9c3d5890545",
+      "name": "On workflow error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "const data = $input.first().json;\nconst workflowName = data.workflow?.name || 'unknown workflow';\nconst execution = data.execution || {};\nconst node = execution.lastNodeExecuted || data.node?.name || null;\nconst message = execution.error?.message || data.error?.message || 'unknown error';\n\n// A failure in execution or monitoring means positions may be unmanaged, so it\n// is unsafe to keep trading. An analysis failure only costs an opportunity.\nconst unsafe = /execution|monitoring|risk/i.test(workflowName);\n\nreturn [{ json: {\n  workflow: workflowName,\n  node,\n  execution_id: String(execution.id ?? ''),\n  message,\n  stack: execution.error?.stack ? String(execution.error.stack).slice(0, 2000) : null,\n  mode: execution.mode || null,\n  unsafe,\n  severity: unsafe ? 'CRITICAL' : 'ERROR',\n} }];\n"
+      },
+      "id": "9369df53-b1b8-5cec-b884-4ef7023e16a3",
+      "name": "Extract error context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}/workflow/error",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 30000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ workflow: $json.workflow, message: $json.message, node: $json.node, execution_id: $json.execution_id, severity: $json.severity, halt_bot: $json.unsafe, context: { stack: $json.stack, mode: $json.mode } }) }}"
+      },
+      "id": "c3c9af81-14b1-5263-a264-7fff29d31ffb",
+      "name": "Record failure",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        480,
+        160
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "trading-api-key",
+          "name": "Trading API Key"
+        }
+      },
+      "notes": "Recorded as a system event; halts the bot when unsafe",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "halted",
+              "leftValue": "={{ $json.halted }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "a63af04b-9d1f-5a29-bf52-79d8bca06149",
+      "name": "Unsafe to continue?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        720,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.N8N_WEBHOOK_URL || 'http://localhost:5678/' }}webhook/emergency-shutdown",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-workflow-secret",
+              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret' }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ reason: 'WORKFLOW_FAILURE', detail: $('Extract error context').first().json.workflow + ': ' + $('Extract error context').first().json.message, source: 'workflow-09' }) }}",
+        "options": {
+          "timeout": 120000
+        }
+      },
+      "id": "68fd24e4-a5fb-5536-b30e-2b45f4558aeb",
+      "name": "Escalate to emergency workflow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        960,
+        80
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "notify",
+              "leftValue": "={{ $env.NOTIFY_WEBHOOK_URL }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "looseTypeValidation": true,
+        "options": {}
+      },
+      "id": "ec7f704c-aa23-5cbe-89ba-f82acbea09cb",
+      "name": "Notify configured?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        960,
+        260
+      ],
+      "notes": "Skips silently when no notification channel is configured",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.NOTIFY_WEBHOOK_URL }}",
+        "sendBody": true,
+        "contentType": "json",
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: `[${$('Extract error context').first().json.severity}] ${$('Extract error context').first().json.workflow} failed at node ${$('Extract error context').first().json.node}: ${$('Extract error context').first().json.message}` }) }}",
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "5559dc17-57e9-5999-9215-74302b074997",
+      "name": "Send failure alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        1200,
+        200
+      ],
+      "onError": "continueRegularOutput",
+      "notes": "Set NOTIFY_WEBHOOK_URL to a Slack/Discord/Teams incoming webhook",
+      "notesInFlow": true
+    },
+    {
+      "parameters": {},
+      "id": "1677457a-9eac-50f5-9987-12f0ae0733b4",
+      "name": "Failure recorded",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1200,
+        340
+      ]
+    }
+  ],
+  "connections": {
+    "On workflow error": {
+      "main": [
+        [
+          {
+            "node": "Extract error context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract error context": {
+      "main": [
+        [
+          {
+            "node": "Record failure",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Record failure": {
+      "main": [
+        [
+          {
+            "node": "Unsafe to continue?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Unsafe to continue?": {
+      "main": [
+        [
+          {
+            "node": "Escalate to emergency workflow",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Notify configured?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Escalate to emergency workflow": {
+      "main": [
+        [
+          {
+            "node": "Notify configured?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Notify configured?": {
+      "main": [
+        [
+          {
+            "node": "Send failure alert",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Failure recorded",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send failure alert": {
+      "main": [
+        [
+          {
+            "node": "Failure recorded",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataErrorExecution": "all",
+    "saveDataSuccessExecution": "all",
+    "saveManualExecutions": true,
+    "saveExecutionProgress": true,
+    "timezone": "UTC",
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "pinData": {},
+  "tags": [
+    {
+      "name": "trading"
+    }
+  ],
+  "meta": {
+    "description": "Central error handler for every trading workflow."
+  },
+  "versionId": "24bd75d9-98b3-5f2d-b080-5f914ea6927a"
+}
