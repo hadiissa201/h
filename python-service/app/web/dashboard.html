@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trading System Monitor</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --panel-2: #1e222b; --border: #2a2f3a;
+    --text: #e6e8ee; --muted: #9aa3b2; --green: #3fb950; --red: #f85149;
+    --amber: #d29922; --blue: #58a6ff;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  header { padding: 14px 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  .badge { padding: 2px 8px; border-radius: 4px; font-size: 12px; border: 1px solid var(--border); }
+  .badge.paper { background: #1f2a1f; color: var(--green); border-color: #2d4a2d; }
+  .badge.live { background: #2a1f1f; color: var(--red); border-color: #4a2d2d; }
+  .badge.running { color: var(--green); }
+  .badge.halted { background: #2a1f1f; color: var(--red); border-color: #4a2d2d; }
+  main { padding: 16px 20px 40px; display: grid; gap: 16px;
+    grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  section.wide { grid-column: 1 / -1; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  .kv { display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; }
+  .kv span:nth-child(even) { text-align: right; font-variant-numeric: tabular-nums; }
+  .muted { color: var(--muted); }
+  .pos { color: var(--green); } .neg { color: var(--red); } .warn { color: var(--amber); }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th { text-align: left; color: var(--muted); font-weight: 500; padding: 4px 6px;
+    border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td { padding: 4px 6px; border-bottom: 1px solid #21252e; vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  .bar { height: 6px; background: var(--panel-2); border-radius: 3px; overflow: hidden; margin-top: 4px; }
+  .bar > div { height: 100%; background: var(--green); }
+  .bar > div.hot { background: var(--red); }
+  .bar > div.mid { background: var(--amber); }
+  .note { background: var(--panel-2); border-left: 3px solid var(--amber);
+    padding: 8px 10px; margin-top: 10px; color: var(--muted); font-size: 12px; }
+  #err { display: none; background: #2a1f1f; color: var(--red);
+    padding: 8px 20px; border-bottom: 1px solid #4a2d2d; }
+  svg { width: 100%; height: 120px; display: block; }
+  .small { font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Trading System Monitor</h1>
+  <span id="mode" class="badge">mode</span>
+  <span id="status" class="badge">status</span>
+  <span id="armed" class="badge">live: ?</span>
+  <span class="muted small" id="updated"></span>
+</header>
+<div id="err"></div>
+<main>
+  <section>
+    <h2>Account</h2>
+    <div class="kv" id="account"></div>
+  </section>
+
+  <section>
+    <h2>Risk usage</h2>
+    <div id="risk"></div>
+  </section>
+
+  <section>
+    <h2>Performance (realised)</h2>
+    <div class="kv" id="perf"></div>
+    <div id="perfnote"></div>
+  </section>
+
+  <section class="wide">
+    <h2>Equity curve</h2>
+    <svg id="equity" viewBox="0 0 800 120" preserveAspectRatio="none"></svg>
+    <div class="muted small" id="equityrange"></div>
+  </section>
+
+  <section class="wide">
+    <h2>Open positions</h2>
+    <div id="positions"></div>
+  </section>
+
+  <section>
+    <h2>Latest signals</h2>
+    <div id="signals"></div>
+  </section>
+
+  <section>
+    <h2>Latest AI decisions</h2>
+    <div id="ai"></div>
+  </section>
+
+  <section>
+    <h2>Latest risk decisions</h2>
+    <div id="riskdec"></div>
+  </section>
+
+  <section>
+    <h2>Recent trades</h2>
+    <div id="trades"></div>
+  </section>
+
+  <section class="wide">
+    <h2>Strategy performance</h2>
+    <div id="strategies"></div>
+  </section>
+
+  <section class="wide">
+    <h2>AI value assessment</h2>
+    <div id="aieval"></div>
+  </section>
+
+  <section class="wide">
+    <h2>Recent events</h2>
+    <div id="events"></div>
+  </section>
+</main>
+
+<script>
+const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v))
+  ? "—" : Number(v).toLocaleString(undefined, {minimumFractionDigits: d, maximumFractionDigits: d});
+const pct = (v, d = 2) => (v === null || v === undefined) ? "—" : (Number(v) * 100).toFixed(d) + "%";
+const cls = v => Number(v) > 0 ? "pos" : Number(v) < 0 ? "neg" : "";
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function kv(el, rows) {
+  el.innerHTML = rows.map(([k, v, c]) =>
+    `<span class="muted">${esc(k)}</span><span class="${c || ""}">${v}</span>`).join("");
+}
+
+function table(el, columns, rows, empty = "nothing yet") {
+  if (!rows.length) { el.innerHTML = `<div class="muted small">${empty}</div>`; return; }
+  el.innerHTML = `<table><thead><tr>${columns.map(c => `<th>${esc(c)}</th>`).join("")}</tr></thead>`
+    + `<tbody>${rows.map(r => `<tr>${r.map(c => `<td>${c}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+}
+
+function meter(label, usedPct, detail) {
+  const value = Math.max(0, Math.min(100, usedPct || 0));
+  const tone = value >= 80 ? "hot" : value >= 50 ? "mid" : "";
+  return `<div style="margin-bottom:10px">
+    <div class="kv"><span class="muted">${esc(label)}</span><span>${detail}</span></div>
+    <div class="bar"><div class="${tone}" style="width:${value}%"></div></div></div>`;
+}
+
+function sparkline(points) {
+  const svg = document.getElementById("equity");
+  if (!points.length) { svg.innerHTML = ""; document.getElementById("equityrange").textContent = "no snapshots yet"; return; }
+  const values = points.map(p => p.equity);
+  const min = Math.min(...values), max = Math.max(...values);
+  const span = (max - min) || 1;
+  const step = points.length > 1 ? 800 / (points.length - 1) : 800;
+  const path = points.map((p, i) => `${i === 0 ? "M" : "L"}${(i * step).toFixed(1)},${(115 - ((p.equity - min) / span) * 110).toFixed(1)}`).join(" ");
+  const last = values[values.length - 1], first = values[0];
+  const colour = last >= first ? "#3fb950" : "#f85149";
+  svg.innerHTML = `<path d="${path}" fill="none" stroke="${colour}" stroke-width="1.5"/>`;
+  document.getElementById("equityrange").textContent =
+    `${points.length} snapshots · low ${fmt(min)} · high ${fmt(max)} · latest ${fmt(last)}`;
+}
+
+const apiKey = new URLSearchParams(location.search).get("key") || "";
+const summaryUrl = "dashboard/summary" + (apiKey ? "?key=" + encodeURIComponent(apiKey) : "");
+
+async function refresh() {
+  let data;
+  try {
+    const headers = {"Accept": "application/json"};
+    if (apiKey) headers["X-API-Key"] = apiKey;
+    const response = await fetch(summaryUrl, {headers});
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    data = await response.json();
+    document.getElementById("err").style.display = "none";
+  } catch (error) {
+    const box = document.getElementById("err");
+    box.style.display = "block";
+    box.textContent = `Failed to load summary: ${error.message}`;
+    return;
+  }
+
+  const mode = document.getElementById("mode");
+  mode.textContent = `mode: ${data.mode}`;
+  mode.className = "badge " + (data.mode === "live" ? "live" : "paper");
+  const status = document.getElementById("status");
+  status.textContent = data.bot.status + (data.bot.halt_reason ? ` (${data.bot.halt_reason})` : "");
+  status.className = "badge " + (data.bot.status === "RUNNING" ? "running" : "halted");
+  const armed = document.getElementById("armed");
+  armed.textContent = data.live_trading_armed ? "LIVE TRADING ARMED" : "live trading disarmed";
+  armed.className = "badge " + (data.live_trading_armed ? "live" : "");
+  document.getElementById("updated").textContent = "updated " + new Date(data.generated_at).toLocaleTimeString();
+
+  const a = data.account;
+  kv(document.getElementById("account"), [
+    ["equity", fmt(a.equity)],
+    ["cash", fmt(a.cash)],
+    ["positions value", fmt(a.positions_value)],
+    ["total P&L", `${fmt(a.total_pnl)} (${pct(a.total_pnl_pct)})`, cls(a.total_pnl)],
+    ["realised / unrealised", `${fmt(a.realized_pnl)} / ${fmt(a.unrealized_pnl)}`],
+    ["today", `${fmt(a.daily_pnl)} (${pct(a.daily_pnl_pct)})`, cls(a.daily_pnl)],
+    ["drawdown from peak", pct(a.drawdown_pct), a.drawdown_pct > 0 ? "warn" : ""],
+    ["exposure", pct(a.exposure_pct)],
+    ["fees paid", fmt(a.fees_paid)],
+  ]);
+
+  const r = data.risk;
+  document.getElementById("risk").innerHTML =
+      meter("daily loss limit used", r.daily_loss_used_pct, `${r.daily_loss_used_pct.toFixed(0)}% of ${pct(r.limits.max_daily_loss_pct)}`)
+    + meter("max drawdown used", r.drawdown_used_pct, `${r.drawdown_used_pct.toFixed(0)}% of ${pct(r.limits.max_drawdown_pct)}`)
+    + `<div class="kv">
+         <span class="muted">open positions</span><span>${esc(r.positions_used)}</span>
+         <span class="muted">risk per trade</span><span>${pct(r.limits.risk_per_trade, 3)}</span>
+         <span class="muted">exposure headroom</span><span>${fmt(r.exposure_headroom)}</span>
+         <span class="muted">consecutive losses</span><span>${data.bot.consecutive_losses}</span>
+         <span class="muted">cooldown</span><span class="${r.cooldown_active ? "warn" : ""}">${r.cooldown_active ? "ACTIVE until " + esc(data.bot.cooldown_until) : "none"}</span>
+       </div>`;
+
+  const p = data.performance;
+  kv(document.getElementById("perf"), [
+    ["closed trades", p.trades],
+    ["win rate", p.win_rate === null ? "—" : pct(p.win_rate)],
+    ["profit factor", fmt(p.profit_factor)],
+    ["expectancy (R)", fmt(p.expectancy_r, 3)],
+    ["net P&L", fmt(p.net_pnl), cls(p.net_pnl)],
+    ["max drawdown", pct(p.max_drawdown_pct)],
+    ["Sharpe / Sortino", `${fmt(p.sharpe_ratio)} / ${fmt(p.sortino_ratio)}`],
+  ]);
+  document.getElementById("perfnote").innerHTML = (p.insufficient_data || p.notes.length)
+    ? `<div class="note">${p.notes.map(esc).join("<br>") || "sample too small for statistical claims"}</div>` : "";
+
+  sparkline(data.equity_curve);
+
+  table(document.getElementById("positions"),
+    ["symbol", "qty", "entry", "mark", "stop", "target", "unrealised", "R", "strategy", "bars"],
+    data.positions.map(x => [esc(x.symbol), fmt(x.quantity, 6), fmt(x.entry_price), fmt(x.mark_price),
+      fmt(x.stop_loss), fmt(x.take_profit), `<span class="${cls(x.unrealized_pnl)}">${fmt(x.unrealized_pnl)}</span>`,
+      fmt(x.r_multiple, 2), esc(x.strategy), x.bars_held]),
+    "flat — no open positions");
+
+  table(document.getElementById("signals"), ["time", "symbol", "tf", "strategy", "dir", "conf", "regime"],
+    data.recent_signals.map(x => [esc(x.at.slice(11, 19)), esc(x.symbol), esc(x.timeframe), esc(x.strategy),
+      esc(x.direction), fmt(x.confidence, 2), esc(x.regime)]));
+
+  table(document.getElementById("ai"), ["time", "symbol", "decision", "conf", "risk", "ok", "provider"],
+    data.recent_ai_decisions.map(x => [esc(x.at.slice(11, 19)), esc(x.symbol), esc(x.decision),
+      fmt(x.confidence, 2), esc(x.risk_assessment), x.parse_ok ? "yes" : `<span class="neg">parse fail</span>`,
+      esc(x.provider)]));
+
+  table(document.getElementById("riskdec"), ["time", "symbol", "verdict", "qty", "why"],
+    data.recent_risk_decisions.map(x => [esc(x.at.slice(11, 19)), esc(x.symbol),
+      x.decision === "APPROVED" ? `<span class="pos">APPROVED</span>` : `<span class="neg">REJECTED</span>`,
+      fmt(x.quantity, 6), esc((x.rejection_codes || []).join(", ") || (x.reasons || []).join("; "))]));
+
+  table(document.getElementById("trades"), ["time", "symbol", "strategy", "P&L", "R", "exit"],
+    data.recent_trades.map(x => [esc(x.at.slice(5, 16)), esc(x.symbol), esc(x.strategy),
+      `<span class="${cls(x.pnl)}">${fmt(x.pnl)}</span>`, fmt(x.r_multiple, 2), esc(x.exit_reason)]));
+
+  table(document.getElementById("strategies"), ["strategy", "trades", "wins", "losses", "win rate", "net P&L", "profit factor", "expectancy R"],
+    Object.entries(p.per_strategy || {}).map(([name, s]) => [esc(name), s.trades, s.wins, s.losses,
+      s.win_rate === null ? "—" : pct(s.win_rate), `<span class="${cls(s.net_pnl)}">${fmt(s.net_pnl)}</span>`,
+      fmt(s.profit_factor), fmt(s.expectancy_r, 3)]),
+    "no closed trades yet");
+
+  const ev = data.ai_evaluation;
+  document.getElementById("aieval").innerHTML =
+    `<div class="kv"><span class="muted">verdict</span><span>${esc(ev.verdict)}</span>
+      <span class="muted">AI decisions</span><span>${ev.decisions ?? 0}</span>
+      <span class="muted">linked closed trades</span><span>${ev.linked_trades ?? 0}</span>
+      <span class="muted">confidence vs R correlation</span><span>${fmt(ev.confidence_vs_r_correlation, 3)}</span></div>
+     <div class="note">${esc(ev.detail || "")}</div>`;
+
+  table(document.getElementById("events"), ["time", "type", "level", "symbol", "message"],
+    data.recent_events.map(x => [esc(x.at.slice(5, 19)), esc(x.type),
+      x.level === "INFO" ? "info" : `<span class="${x.level === "WARNING" ? "warn" : "neg"}">${esc(x.level)}</span>`,
+      esc(x.symbol), esc(x.message)]));
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

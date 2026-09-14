@@ -1,0 +1,140 @@
+# AI crypto trading system — local development stack.
+#
+#   n8n                     orchestration (schedules, HTTP calls, error workflows)
+#   python-trading-service  quant, risk, execution, backtesting  (this repo)
+#   postgres                system of record
+#   redis                   short-lived shared state (optional; profile "cache")
+#
+# Everything starts in PAPER mode. Live trading needs three env switches plus
+# exchange credentials — see docs/LIVE_TRADING_CHECKLIST.md.
+#
+#   cp .env.example .env && docker compose up -d
+#   open http://localhost:5678            (n8n)
+#   open http://localhost:8000/?key=...   (dashboard, SERVICE_API_KEY)
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: trading-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-trader}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trader}
+      POSTGRES_DB: ${POSTGRES_DB:-trading}
+      # n8n gets its own database in the same instance, created on first boot.
+      POSTGRES_MULTIPLE_DATABASES: n8n
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-databases.sh:/docker-entrypoint-initdb.d/10-init-databases.sh:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-trader} -d ${POSTGRES_DB:-trading}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [trading]
+
+  redis:
+    image: redis:7-alpine
+    container_name: trading-redis
+    restart: unless-stopped
+    # Optional. Postgres is the system of record; Redis only caches short-lived
+    # state. Start it with: docker compose --profile cache up -d
+    profiles: [cache]
+    command: ["redis-server", "--save", "", "--appendonly", "no", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks: [trading]
+
+  python-trading-service:
+    build:
+      context: ./python-service
+      dockerfile: Dockerfile
+    container_name: trading-python
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: [.env]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-trader}:${POSTGRES_PASSWORD:-trader}@postgres:5432/${POSTGRES_DB:-trading}
+      REDIS_URL: ${REDIS_URL:-}
+      API_HOST: 0.0.0.0
+      API_PORT: 8000
+    # Migrate before serving: the API must never run against an older schema.
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --proxy-headers"
+    ports:
+      - "${API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health/live"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    # host.docker.internal lets the container reach an Ollama instance running
+    # on the host (LLM_PROVIDER=ollama, LLM_BASE_URL=http://host.docker.internal:11434).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks: [trading]
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: trading-n8n
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      python-trading-service:
+        condition: service_started
+    environment:
+      # --- database
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: 5432
+      DB_POSTGRESDB_DATABASE: n8n
+      DB_POSTGRESDB_USER: ${POSTGRES_USER:-trader}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-trader}
+      # --- access
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      WEBHOOK_URL: ${N8N_WEBHOOK_URL:-http://localhost:5678/}
+      GENERIC_TIMEZONE: ${TZ:-UTC}
+      TZ: ${TZ:-UTC}
+      N8N_BASIC_AUTH_ACTIVE: ${N8N_BASIC_AUTH_ACTIVE:-true}
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD:-change-me}
+      # Required so n8n can encrypt stored credentials; must stay stable.
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?set N8N_ENCRYPTION_KEY in .env}
+      # --- behaviour
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_VERSION_NOTIFICATIONS_ENABLED: "false"
+      N8N_RUNNERS_ENABLED: "true"
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "336"
+      # Convenience for the imported workflows: the base URL of this service.
+      TRADING_API_BASE_URL: http://python-trading-service:8000
+    volumes:
+      - n8n-data:/home/node/.n8n
+      # Workflow JSON is mounted read-only for import:
+      #   docker compose exec n8n n8n import:workflow --separate --input=/workflows
+      - ./n8n/workflows:/workflows:ro
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    networks: [trading]
+
+volumes:
+  postgres-data:
+  n8n-data:
+
+networks:
+  trading:
+    driver: bridge

@@ -1,0 +1,39 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+credentials.json
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.mypy_cache/
+
+# Local data
+*.db
+*.sqlite
+*.sqlite3
+data/
+logs/
+*.log
+
+# Backtest / research output
+reports/*.html
+reports/*.csv
+!reports/.gitkeep
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

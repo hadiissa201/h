@@ -1,0 +1,19 @@
+# Runtime dependencies for the Python trading / quant service.
+# Pinned to compatible-release ranges so CI stays reproducible while
+# still picking up patch-level security fixes.
+
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+pydantic-settings==2.7.0
+SQLAlchemy==2.0.36
+alembic==1.14.0
+psycopg[binary]==3.2.3
+pandas==2.2.3
+numpy==2.2.1
+httpx==0.28.1
+ccxt==4.4.50
+redis==5.2.1
+python-json-logger==3.2.1
+jinja2==3.1.5
+tenacity==9.0.0
