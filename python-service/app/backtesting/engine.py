@@ -34,6 +34,7 @@ from typing import Any
 
 import pandas as pd
 
+from app.analytics.metrics import EquityPointLite, TradeSummary, compute_metrics
 from app.core.numeric import ZERO, round_money, safe_div, to_decimal
 from app.execution.fill_model import CostModel, simulate_market_fill
 from app.features import FeatureConfig, FeatureEngine
@@ -56,7 +57,6 @@ from app.portfolio.exit_rules import BarPrices, PositionState, evaluate_exit, up
 from app.regime import RegimeDetector
 from app.risk.engine import MarketConditions, RiskEngine
 from app.strategies import StrategyEngine
-from app.analytics.metrics import EquityPointLite, TradeSummary, compute_metrics
 from app.utils.time import ensure_utc
 
 
@@ -65,6 +65,10 @@ class _OpenPosition:
     entry_time: datetime
     entry_price: Decimal
     quantity: Decimal
+    # Fixed at entry. `quantity` shrinks on a partial exit, so the entry fee must
+    # be amortised against this instead — otherwise each subsequent exit charges
+    # a larger share of the same fee and realised P&L drifts from cash.
+    initial_quantity: Decimal
     state: PositionState
     strategy: str
     regime: str
@@ -204,6 +208,7 @@ class BacktestEngine:
                         entry_time=timestamp,
                         entry_price=fill.price,
                         quantity=fill.quantity,
+                        initial_quantity=fill.quantity,
                         state=state,
                         strategy=pending["strategy"],
                         regime=pending["regime"],
@@ -240,7 +245,8 @@ class BacktestEngine:
                     )
                     cash = round_money(cash + exit_fill.notional - exit_fill.fee, 8)
                     entry_fee_share = round_money(
-                        safe_div(position.entry_fee, position.quantity) * quantity, 8
+                        safe_div(position.entry_fee, position.initial_quantity) * quantity,
+                        8,
                     )
                     gross = round_money(
                         (exit_fill.price - position.entry_price) * quantity, 8
@@ -400,7 +406,8 @@ class BacktestEngine:
             )
             cash = round_money(cash + exit_fill.notional - exit_fill.fee, 8)
             entry_fee_share = round_money(
-                safe_div(position.entry_fee, position.quantity) * position.quantity, 8
+                safe_div(position.entry_fee, position.initial_quantity) * position.quantity,
+                8,
             )
             gross = round_money(
                 (exit_fill.price - position.entry_price) * position.quantity, 8
@@ -424,6 +431,20 @@ class BacktestEngine:
                 "at the final close; treat that trade as incomplete"
             )
             position = None
+
+            # Re-stamp the final equity point with the realised close. Without
+            # this the last point still marks the position to market, so
+            # `ending_equity` disagrees with the sum of trade P&L by the exit
+            # costs — a small gap that makes every derived return figure
+            # impossible to reconcile against the trade list.
+            if equity_curve:
+                equity_curve[-1] = EquityPoint(
+                    timestamp=equity_curve[-1].timestamp,
+                    equity=cash,
+                    cash=cash,
+                    drawdown_pct=equity_curve[-1].drawdown_pct,
+                    open_positions=0,
+                )
 
         metrics = compute_metrics(
             [_to_summary(trade) for trade in trades],
@@ -514,7 +535,7 @@ def _weighted_price(exits: list[dict[str, Any]]) -> Decimal:
     return round_money(notional / total_quantity, 8)
 
 
-def _feature_at(features, index: int, name: str) -> Decimal | None:  # noqa: ANN001
+def _feature_at(features, index: int, name: str) -> Decimal | None:
     if name not in features.frame.columns:
         return None
     value = features.frame[name].iloc[index]

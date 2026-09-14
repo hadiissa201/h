@@ -71,7 +71,7 @@ def redact(payload: Any) -> Any:
             else:
                 clean[str(key)] = redact(value)
         return clean
-    if isinstance(payload, (list, tuple)):
+    if isinstance(payload, list | tuple):
         return [redact(item) for item in payload]
     if isinstance(payload, Decimal):
         return float(payload)

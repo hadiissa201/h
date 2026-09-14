@@ -166,7 +166,7 @@ def _clean(value: Any) -> float | None:
     """JSON-safe scalar: NaN/inf -> None, numpy -> python."""
     if value is None:
         return None
-    if isinstance(value, (bool, np.bool_)):
+    if isinstance(value, bool | np.bool_):
         return float(value)
     try:
         number = float(value)

@@ -9,10 +9,12 @@ support a statistic, the field is ``None`` and ``insufficient_data`` is set.
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Sequence
+from itertools import pairwise
+from typing import Any
 
 from app.core.numeric import ZERO, round_money, safe_div
 from app.models.backtest import PerformanceMetrics
@@ -53,7 +55,7 @@ class EquityPointLite:
     equity: Decimal
 
 
-def trade_from_record(record) -> TradeSummary:  # noqa: ANN001 - ORM row
+def trade_from_record(record) -> TradeSummary:
     return TradeSummary(
         pnl=record.pnl,
         fees=record.fees or ZERO,
@@ -220,12 +222,12 @@ def _periodic_returns(
     if len(equity_curve) < 2:
         return [], 1.0
     returns: list[float] = []
-    for previous, current in zip(equity_curve, equity_curve[1:], strict=False):
+    for previous, current in pairwise(equity_curve):
         if previous.equity > ZERO:
             returns.append(float((current.equity - previous.equity) / previous.equity))
     deltas = [
         (current.timestamp - previous.timestamp).total_seconds()
-        for previous, current in zip(equity_curve, equity_curve[1:], strict=False)
+        for previous, current in pairwise(equity_curve)
         if (current.timestamp - previous.timestamp).total_seconds() > 0
     ]
     if deltas:
@@ -244,7 +246,7 @@ def _years_covered(equity_curve: Sequence[EquityPointLite]) -> float:
     return span / SECONDS_PER_YEAR if span > 0 else 0.0
 
 
-def _group_metrics(trades: Sequence[TradeSummary], key) -> dict[str, dict[str, Any]]:  # noqa: ANN001
+def _group_metrics(trades: Sequence[TradeSummary], key) -> dict[str, dict[str, Any]]:
     groups: dict[str, list[TradeSummary]] = {}
     for trade in trades:
         groups.setdefault(key(trade), []).append(trade)

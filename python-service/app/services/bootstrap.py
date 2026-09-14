@@ -10,10 +10,10 @@ from __future__ import annotations
 
 from sqlalchemy.orm import Session
 
+from app.container import build_services
 from app.core.config import Settings, get_settings
 from app.core.events import EventType
 from app.core.logging import get_logger, log_event
-from app.container import build_services
 from app.database.models import Base
 from app.database.session import get_engine
 from app.execution.paper_exchange import PaperExchangeAdapter

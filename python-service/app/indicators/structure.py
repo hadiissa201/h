@@ -22,11 +22,11 @@ def find_pivots(
     """Detect fractal pivots and expose them only when confirmable.
 
     Returns columns:
-      ``pivot_high`` / ``pivot_low``  – raw (retrospective) pivot prices, NaN
+      ``pivot_high`` / ``pivot_low``  - raw (retrospective) pivot prices, NaN
         elsewhere. Useful for charting/backtest reporting, **not** for signals.
-      ``swing_high_confirmed`` / ``swing_low_confirmed`` – booleans available in
+      ``swing_high_confirmed`` / ``swing_low_confirmed`` - booleans available in
         real time.
-      ``last_swing_high`` / ``last_swing_low`` – most recent confirmed pivot
+      ``last_swing_high`` / ``last_swing_low`` - most recent confirmed pivot
         price as known at each bar.
     """
     if left < 1 or right < 1:

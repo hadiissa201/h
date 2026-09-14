@@ -193,7 +193,7 @@ def _compact(payload: dict[str, Any]) -> dict[str, Any]:
 def _round(value: Any) -> Any:
     if isinstance(value, bool):
         return value
-    if isinstance(value, (int,)):
+    if isinstance(value, int):
         return value
     try:
         number = float(value)

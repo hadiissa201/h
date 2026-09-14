@@ -11,7 +11,6 @@ from __future__ import annotations
 from collections import Counter
 from decimal import Decimal
 
-import numpy as np
 import pytest
 
 from app.features import FeatureEngine
@@ -95,8 +94,10 @@ def test_parameters_can_be_overridden():
 
 
 def test_parameters_are_immutable():
+    from pydantic import ValidationError
+
     strategy = TrendFollowingStrategy()
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         strategy.params.adx_min = 5.0
 
 

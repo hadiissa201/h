@@ -23,14 +23,13 @@ from app.core.config import Settings, get_settings
 from app.core.errors import MarketDataError
 from app.core.events import EventType
 from app.core.logging import get_logger, log_event
-from app.core.numeric import ZERO, to_decimal
+from app.core.numeric import to_decimal
 from app.data.service import MarketDataService
 from app.database.repositories import EventRepository, ExecutionRepository
 from app.execution.service import ExecutionService
 from app.models.enums import ExitReason
 from app.portfolio.exit_rules import BarPrices, evaluate_exit, update_stops
 from app.portfolio.service import PortfolioService
-from app.utils.time import utcnow
 
 logger = get_logger(__name__)
 
@@ -185,7 +184,7 @@ class PositionMonitor:
                     reason=decision.reason or ExitReason.MANUAL,
                     detail=decision.detail,
                 )
-            except Exception as exc:  # noqa: BLE001 - one bad symbol must not stop the pass
+            except Exception as exc:
                 outcome.errors.append(
                     {"position_id": record.id, "symbol": record.symbol, "error": str(exc)}
                 )
@@ -218,7 +217,7 @@ class PositionMonitor:
         return outcome
 
 
-def _latest_atr(frame, settings: Settings) -> Decimal | None:  # noqa: ANN001
+def _latest_atr(frame, settings: Settings) -> Decimal | None:
     from app.indicators import atr as atr_indicator
 
     if len(frame) < settings.min_candles_for_analysis // 4:

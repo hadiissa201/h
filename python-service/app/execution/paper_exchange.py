@@ -43,7 +43,6 @@ from app.models.enums import (
     Side,
     TradingModeEnum,
 )
-from app.portfolio.mapping import position_from_record
 from app.models.market import OrderBook, Ticker
 from app.models.trading import (
     Balance,
@@ -53,6 +52,7 @@ from app.models.trading import (
     Position,
     SymbolSpec,
 )
+from app.portfolio.mapping import position_from_record
 from app.utils.time import utcnow
 
 logger = get_logger(__name__)
@@ -267,7 +267,7 @@ class PaperExchangeAdapter(ExchangeAdapter):
                 )
         now = utcnow()
         order_id = new_id("po_")
-        record = self.repository.add_order(
+        self.repository.add_order(
             {
                 "id": order_id,
                 "client_order_id": request.client_order_id,
@@ -308,7 +308,7 @@ class PaperExchangeAdapter(ExchangeAdapter):
             return self._reject(request, "stop order requires a positive stop_price")
         now = utcnow()
         order_id = new_id("po_")
-        record = self.repository.add_order(
+        self.repository.add_order(
             {
                 "id": order_id,
                 "client_order_id": request.client_order_id,

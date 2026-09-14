@@ -14,10 +14,18 @@ from __future__ import annotations
 
 import functools
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+# Lists come from the environment as plain comma-separated strings
+# (``TRADING_SYMBOLS=BTC/USDT,ETH/USDT``), which is what .env.example documents and
+# what docker-compose passes. Without ``NoDecode`` pydantic-settings tries to JSON
+# parse them at the *source* layer, before any validator runs, and the service dies
+# on boot with "error parsing value for field". ``NoDecode`` hands the raw string to
+# ``_split_csv`` below instead.
+CsvList = Annotated[list[str], NoDecode]
 
 TradingMode = Literal["paper", "live"]
 LLMProvider = Literal["ollama", "openai", "anthropic", "disabled"]
@@ -59,8 +67,8 @@ class Settings(BaseSettings):
     redis_url: str = Field(default="")
 
     # ------------------------------------------------------------- market
-    trading_symbols: list[str] = Field(default=["BTC/USDT", "ETH/USDT", "SOL/USDT"])
-    timeframes: list[str] = Field(default=["5m", "15m", "1h", "4h"])
+    trading_symbols: CsvList = Field(default=["BTC/USDT", "ETH/USDT", "SOL/USDT"])
+    timeframes: CsvList = Field(default=["5m", "15m", "1h", "4h"])
     primary_timeframe: str = Field(default="1h")
     quote_currency: str = Field(default="USDT")
 
@@ -133,7 +141,7 @@ class Settings(BaseSettings):
     ai_min_minutes_between_calls_per_symbol: int = Field(default=15, ge=0)
 
     # ---------------------------------------------------------- strategies
-    enabled_strategies: list[str] = Field(
+    enabled_strategies: CsvList = Field(
         default=[
             "trend_following",
             "ema_momentum",

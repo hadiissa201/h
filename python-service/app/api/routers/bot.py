@@ -25,7 +25,7 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/bot", tags=["bot"])
 
 
-def _state_model(record, settings) -> BotState:  # noqa: ANN001
+def _state_model(record, settings) -> BotState:
     return BotState(
         status=BotStatus(record.status),
         mode=TradingModeEnum(record.mode),

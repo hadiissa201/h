@@ -30,18 +30,18 @@ os.environ.update(
     PAPER_STARTING_BALANCE="10000",
 )
 
-from app.container import build_services, reset_market_data_service  # noqa: E402
-from app.core.config import get_settings, reset_settings_cache  # noqa: E402
-from app.core.logging import configure_logging  # noqa: E402
-from app.data.providers.synthetic import SyntheticMarketDataProvider  # noqa: E402
-from app.data.service import MarketDataService  # noqa: E402
-from app.database.models import Base  # noqa: E402
-from app.database.session import configure_engine, reset_engine  # noqa: E402
-from app.features import FeatureEngine  # noqa: E402
-from app.models.enums import SignalDirection  # noqa: E402
-from app.models.risk import RiskProposal  # noqa: E402
-from app.regime import RegimeDetector  # noqa: E402
-from app.services.bootstrap import bootstrap_session  # noqa: E402
+from app.container import build_services, reset_market_data_service
+from app.core.config import get_settings, reset_settings_cache
+from app.core.logging import configure_logging
+from app.data.providers.synthetic import SyntheticMarketDataProvider
+from app.data.service import MarketDataService
+from app.database.models import Base
+from app.database.session import configure_engine, reset_engine
+from app.features import FeatureEngine
+from app.models.enums import SignalDirection
+from app.models.risk import RiskProposal
+from app.regime import RegimeDetector
+from app.services.bootstrap import bootstrap_session
 
 configure_logging("CRITICAL", "console")
 

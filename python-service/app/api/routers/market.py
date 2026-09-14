@@ -8,7 +8,7 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
 from app.api.deps import ServicesDep, SettingsDep
-from app.features import FeatureEngine, FeatureConfig
+from app.features import FeatureConfig, FeatureEngine
 
 router = APIRouter(prefix="/market", tags=["market"])
 

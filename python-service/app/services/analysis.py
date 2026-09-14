@@ -308,7 +308,7 @@ class AnalysisService:
             )
         return result
 
-    def _persist_analysis(self, features: FeatureSet, assessment, result) -> None:  # noqa: ANN001
+    def _persist_analysis(self, features: FeatureSet, assessment, result) -> None:
         self.market_repo.save_features(
             features.symbol,
             features.timeframe,

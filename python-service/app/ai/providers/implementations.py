@@ -249,7 +249,7 @@ class DisabledProvider(LLMProvider):
         return True, "AI disabled by configuration"
 
 
-def build_provider(settings) -> LLMProvider:  # noqa: ANN001 - avoids import cycle
+def build_provider(settings) -> LLMProvider:
     if not settings.ai_enabled or settings.llm_provider == "disabled":
         return DisabledProvider()
     if settings.llm_provider == "ollama":

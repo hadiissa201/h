@@ -43,7 +43,7 @@ def health(services: ServicesDep, settings: SettingsDep) -> HealthResponse:
                 latency_ms=round((time.perf_counter() - started) * 1000, 2),
             )
         )
-    except Exception as exc:  # noqa: BLE001 - health must not raise
+    except Exception as exc:
         components.append(
             ComponentHealth(
                 name="market_data",

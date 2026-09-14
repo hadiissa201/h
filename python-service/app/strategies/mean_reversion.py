@@ -194,10 +194,7 @@ class MeanReversionStrategy(Strategy):
         if context.regime.regime is MarketRegime.RANGE:
             score += 0.1
         stoch = row.get("stoch_rsi_k")
-        if stoch is not None:
-            if long and stoch < 20:
-                score += 0.06
-            elif not long and stoch > 80:
+        if stoch is not None and ((long and stoch < 20) or (not long and stoch > 80)):
                 score += 0.06
         relative_volume = row.get("relative_volume")
         if relative_volume is not None and relative_volume > 1.5:

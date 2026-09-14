@@ -55,7 +55,7 @@ class ApprovalCheck:
 
 
 def verify_approval(
-    record,  # noqa: ANN001 - RiskDecisionRecord
+    record,
     *,
     symbol: str,
     side: str,

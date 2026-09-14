@@ -21,7 +21,6 @@ from typing import Any
 from app.core.errors import TradingError
 from app.core.events import EventType
 from app.core.logging import get_logger, log_event
-from app.models.risk import RiskProposal
 from app.models.signals import AnalysisResult
 from app.utils.time import utcnow
 
@@ -60,7 +59,7 @@ class PipelineOutcome:
 
 
 class TradingPipeline:
-    def __init__(self, services) -> None:  # noqa: ANN001 - app.container.Services
+    def __init__(self, services) -> None:
         self.services = services
 
     def run_symbol(
@@ -192,7 +191,7 @@ class TradingPipeline:
         return outcomes
 
 
-def _exit_plan(candidate) -> dict[str, Any]:  # noqa: ANN001
+def _exit_plan(candidate) -> dict[str, Any]:
     """Carry the winning strategy's exit plan onto the position."""
     primary = candidate.primary_signal
     if primary is None:

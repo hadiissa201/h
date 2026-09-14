@@ -3,6 +3,14 @@
 Single source of truth for equity, exposure, drawdown and daily P&L — the numbers
 the risk engine gates on. Nothing here accepts a caller-supplied equity figure:
 everything is derived from persisted balances, positions and trades.
+
+The books must always close::
+
+    equity == starting_equity + realised P&L + unrealised P&L - unamortised entry fees
+
+``reconciliation_error()`` returns that residual and is asserted to be zero in the
+lifecycle tests. The last term exists because an entry fee is paid up front but
+only enters realised P&L as exits amortise it.
 """
 
 from __future__ import annotations
@@ -91,19 +99,83 @@ class PortfolioService:
                 total += (record.entry_price - price) * record.quantity
         return round_money(total, 8)
 
+    def unamortized_entry_fees(self) -> Decimal:
+        """Entry fees already paid that no P&L figure has absorbed yet.
+
+        An entry fee is charged in full when the position opens, but it is only
+        booked into realised P&L as each exit amortises its share (see
+        ``ExecutionService._close``). While a position is open the residual share
+        sits outside both realised and unrealised P&L, which is exactly the gap in
+        the reconciliation below. Exposing it makes that gap auditable instead of
+        looking like drift.
+        """
+        total = ZERO
+        for record in self.execution.open_positions():
+            meta = record.meta or {}
+            remaining = meta.get("entry_fee_unamortized", meta.get("entry_fee"))
+            if remaining is None:
+                continue
+            total += Decimal(str(remaining))
+        return round_money(total, 8)
+
+    #: Largest reconciliation residual attributable to rounding alone.
+    #:
+    #: Equity rounds ``price * quantity`` per leg, while P&L rounds
+    #: ``(mark - entry) * quantity``; the two are identical before rounding but
+    #: each 8dp quantisation can land one unit apart. The bound is therefore a
+    #: few units of the last decimal place — one hundredth of a millionth of a
+    #: quote unit. Anything larger is a real accounting error, not noise.
+    RECONCILIATION_TOLERANCE = Decimal("0.000001")
+
+    def reconciliation_error(self, prices: dict[str, Decimal] | None = None) -> Decimal:
+        """How far the books are from closing.
+
+        ``equity == starting + realised + unrealised - unamortised entry fees``.
+        A residual above :attr:`RECONCILIATION_TOLERANCE` means cash, positions and
+        P&L genuinely disagree, and every performance number downstream is suspect.
+        """
+        expected = (
+            self.starting_equity()
+            + self.realized_pnl()
+            + self.unrealized_pnl(prices)
+            - self.unamortized_entry_fees()
+        )
+        return round_money(self.equity(prices) - expected, 8)
+
+    def books_balance(self, prices: dict[str, Decimal] | None = None) -> bool:
+        return abs(self.reconciliation_error(prices)) <= self.RECONCILIATION_TOLERANCE
+
     def cash(self) -> Decimal:
         record = self.execution.get_balance(self.settings.quote_currency)
         return record.free if record else ZERO
 
     def realized_pnl(self) -> Decimal:
-        total = sum(
-            (trade.pnl for trade in self.execution.all_trades()), start=ZERO
+        """P&L that has actually hit cash, including partial exits still open.
+
+        A trade row is written only when a position closes completely, so summing
+        trades alone hides the cash already banked by a partial exit: equity would
+        rise while ``realized_pnl`` stayed flat and ``unrealized_pnl`` only covered
+        the residual quantity, and the three would stop reconciling.
+        """
+        closed = sum((trade.pnl for trade in self.execution.all_trades()), start=ZERO)
+        banked = sum(
+            (record.realized_pnl or ZERO for record in self.execution.open_positions()),
+            start=ZERO,
         )
-        return round_money(total, 8)
+        return round_money(closed + banked, 8)
 
     def fees_paid(self) -> Decimal:
-        total = sum((trade.fees for trade in self.execution.all_trades()), start=ZERO)
-        return round_money(total, 8)
+        """Every fee already paid, not just the fees on closed trades.
+
+        An open position has paid its entry fee; reporting 0 while that money has
+        left the account is misleading and does not reconcile against equity.
+        """
+        closed = sum((trade.fees for trade in self.execution.all_trades()), start=ZERO)
+        open_fees = sum(
+            (record.fees_paid or ZERO for record in self.execution.open_positions()),
+            start=ZERO,
+        )
+        return round_money(closed + open_fees, 8)
 
     def equity(self, prices: dict[str, Decimal] | None = None) -> Decimal:
         return round_money(self.cash() + self.positions_value(prices), 8)

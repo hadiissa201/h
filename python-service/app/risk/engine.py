@@ -403,7 +403,7 @@ class RiskEngine:
         )
 
 
-def limits_from_settings(settings, *, allow_short: bool = False) -> RiskLimitsView:  # noqa: ANN001
+def limits_from_settings(settings, *, allow_short: bool = False) -> RiskLimitsView:
     return RiskLimitsView(
         risk_per_trade=to_decimal(settings.risk_per_trade),
         max_position_pct_equity=to_decimal(settings.max_position_pct_equity),

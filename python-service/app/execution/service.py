@@ -223,6 +223,11 @@ class ExecutionService:
                     # fees too — the entry fee must be amortised across exits
                     # exactly once.
                     "entry_fee": str(order.fee_paid),
+                    # Running remainder, decremented by each exit's share. Kept
+                    # as a balance rather than recomputed from the remaining
+                    # quantity so rounding cannot leave a stray ulp outside both
+                    # realised and unrealised P&L.
+                    "entry_fee_unamortized": str(order.fee_paid),
                     "exits": [],
                 },
             }
@@ -316,10 +321,18 @@ class ExecutionService:
         exit_price = order.average_fill_price or order.price
         filled = order.filled_quantity
         gross = round_money((exit_price - record.entry_price) * filled, 8)
-        entry_fee = _decimal_or_none((record.meta or {}).get("entry_fee")) or ZERO
+        meta_before = record.meta or {}
+        entry_fee = _decimal_or_none(meta_before.get("entry_fee")) or ZERO
+        unamortized = _decimal_or_none(meta_before.get("entry_fee_unamortized"))
+        if unamortized is None:  # position opened before this field existed
+            unamortized = entry_fee
         entry_fee_share = round_money(
             safe_div(entry_fee, record.initial_quantity) * filled, 8
         )
+        # The final exit takes whatever is left, so the shares always sum to the
+        # fee actually paid rather than to a rounded approximation of it.
+        if entry_fee_share > unamortized or record.quantity - filled <= ZERO:
+            entry_fee_share = unamortized
         # Net P&L is what actually hit cash: price move minus BOTH fees. Omitting
         # the entry fee here would make realized P&L disagree with the balance.
         net = round_money(gross - order.fee_paid - entry_fee_share, 8)
@@ -341,6 +354,7 @@ class ExecutionService:
         )
         meta = dict(record.meta or {})
         meta["exits"] = exits
+        meta["entry_fee_unamortized"] = str(round_money(unamortized - entry_fee_share, 8))
         record.meta = meta
 
         fully_closed = record.quantity <= ZERO
@@ -387,7 +401,7 @@ class ExecutionService:
             self.risk.run_safety_checks()
         return order, position_from_record(record)
 
-    def _record_trade(self, record, reason: ExitReason):  # noqa: ANN001
+    def _record_trade(self, record, reason: ExitReason):
         entry_price = record.entry_price
         exit_price = record.exit_price or record.mark_price or entry_price
         quantity = record.initial_quantity
@@ -488,7 +502,7 @@ class ExecutionService:
                     record.id, reason=reason, detail=detail or "emergency flatten"
                 )
                 closed.append(position)
-            except Exception as exc:  # noqa: BLE001 - keep flattening
+            except Exception as exc:
                 log_event(
                     logger,
                     EventType.SYSTEM_ERROR,
@@ -507,7 +521,7 @@ class ExecutionService:
         return closed
 
     # ------------------------------------------------------------- book-keeping
-    def position_state(self, record) -> PositionState:  # noqa: ANN001
+    def position_state(self, record) -> PositionState:
         """Build the shared exit-rule state from a stored position."""
         plan = record.exit_plan or {}
         return PositionState(
@@ -528,7 +542,7 @@ class ExecutionService:
             bars_held=record.bars_held or 0,
         )
 
-    def persist_position_state(self, record, state: PositionState) -> None:  # noqa: ANN001
+    def persist_position_state(self, record, state: PositionState) -> None:
         plan = dict(record.exit_plan or {})
         plan.update(
             {
@@ -570,7 +584,7 @@ def _weighted_exit_price(exits: list[dict]) -> Decimal:
     return round_money(total_notional / total_quantity, 8)
 
 
-def _decimal_or_none(value) -> Decimal | None:  # noqa: ANN001
+def _decimal_or_none(value) -> Decimal | None:
     if value in (None, "", "None"):
         return None
     return Decimal(str(value))

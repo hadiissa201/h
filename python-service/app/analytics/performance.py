@@ -12,19 +12,19 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from app.core.config import Settings, get_settings
-from app.core.numeric import ZERO, safe_div
-from app.database.repositories import (
-    AIRepository,
-    ExecutionRepository,
-    PerformanceRepository,
-    RiskRepository,
-)
 from app.analytics.metrics import (
     EquityPointLite,
     TradeSummary,
     compute_metrics,
     trade_from_record,
+)
+from app.core.config import Settings, get_settings
+from app.core.numeric import ZERO
+from app.database.repositories import (
+    AIRepository,
+    ExecutionRepository,
+    PerformanceRepository,
+    RiskRepository,
 )
 from app.models.ai import PerformanceContext
 from app.models.backtest import PerformanceMetrics
@@ -301,7 +301,7 @@ def _correlation(xs: list[float], ys: list[float]) -> float | None:
     return round(covariance / ((var_x**0.5) * (var_y**0.5)), 4)
 
 
-def _group_by(linked, key) -> dict[str, dict[str, Any]]:  # noqa: ANN001
+def _group_by(linked, key) -> dict[str, dict[str, Any]]:
     groups: dict[str, list[tuple[Any, Any]]] = {}
     for decision, trade in linked:
         groups.setdefault(key(decision, trade), []).append((decision, trade))

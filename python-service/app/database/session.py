@@ -64,7 +64,12 @@ def get_session_factory(settings: Settings | None = None) -> sessionmaker[Sessio
     if _session_factory is None:
         _session_factory = sessionmaker(
             bind=get_engine(settings),
-            autoflush=False,
+            # autoflush ON: a query must see writes made earlier in the same
+            # request. With it off, cancelling an order and then listing open
+            # orders returns the cancelled one, and the monitor can act on stale
+            # position state. Read-after-write consistency matters more here than
+            # avoiding a mid-transaction flush.
+            autoflush=True,
             autocommit=False,
             expire_on_commit=False,
         )
@@ -106,7 +111,7 @@ def configure_engine(engine: Engine) -> None:
     global _engine, _session_factory
     _engine = engine
     _session_factory = sessionmaker(
-        bind=engine, autoflush=False, autocommit=False, expire_on_commit=False
+        bind=engine, autoflush=True, autocommit=False, expire_on_commit=False
     )
 
 

@@ -49,7 +49,7 @@ Reply with one JSON object:
 
 
 def build_daily_report(
-    services,  # noqa: ANN001 - app.container.Services
+    services,
     *,
     day_offset: int = 0,
     include_ai_summary: bool = True,
@@ -96,6 +96,11 @@ def build_daily_report(
             "drawdown_pct": float(snapshot.drawdown_pct),
             "exposure_pct": float(snapshot.exposure_pct),
             "open_positions": snapshot.open_positions,
+            "fees_paid": float(snapshot.fees_paid),
+            # If the books stop closing, every other number in this report is
+            # suspect — so it is stated here rather than left to be discovered.
+            "reconciliation_error": float(services.portfolio.reconciliation_error()),
+            "books_balance": services.portfolio.books_balance(),
         },
         "metrics": summary["metrics"],
         "trades": summary["trades"],
@@ -153,7 +158,7 @@ def build_daily_report(
     }
 
 
-def _ai_summary(services, facts: dict[str, Any]) -> tuple[str | None, str | None]:  # noqa: ANN001
+def _ai_summary(services, facts: dict[str, Any]) -> tuple[str | None, str | None]:
     provider = services.ai.provider
     if not provider.enabled:
         return None, "disabled"
@@ -190,12 +195,29 @@ def _render_markdown(facts: dict[str, Any], ai_summary: str | None) -> str:
     lines = [
         f"# Daily trading report — {facts['period']['start'][:10]}",
         "",
+    ]
+    if facts["bot_status"] != "RUNNING":
+        lines += [
+            f"> **BOT STATUS: {facts['bot_status']}** — {facts.get('halt_reason') or 'no reason recorded'}. "
+            "No new entries until a manual reset.",
+            "",
+        ]
+    lines += [
         f"- Mode: **{facts['mode']}** (bot status: {facts['bot_status']})",
         f"- Equity: **{account['equity']:.2f}** "
         f"(daily P&L {account['daily_pnl']:+.2f} / {account['daily_pnl_pct'] * 100:+.2f}%)",
         f"- Drawdown from peak: {account['drawdown_pct'] * 100:.2f}%",
         f"- Open positions: {account['open_positions']}, exposure "
         f"{account['exposure_pct'] * 100:.1f}% of equity",
+        f"- Fees paid to date: {account['fees_paid']:.2f}",
+    ]
+    if not account.get("books_balance", True):
+        lines.append(
+            f"- ⚠️ **Accounting does not reconcile** by "
+            f"{account['reconciliation_error']:+.8f}. Treat every figure below as "
+            "unverified and investigate before trading further."
+        )
+    lines += [
         "",
         "## Trading",
         f"- Closed trades: {metrics.get('trades', 0)} "

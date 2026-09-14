@@ -36,7 +36,6 @@ from app.models.ai import (
     AIEvaluation,
     OpenPositionContext,
 )
-from app.models.enums import SignalDirection
 from app.models.risk import RiskLimitsView, RiskProposal
 from app.models.signals import TradeCandidate
 from app.portfolio.service import PortfolioService

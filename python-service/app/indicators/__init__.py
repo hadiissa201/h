@@ -18,8 +18,8 @@ from app.indicators.trend import (
     efficiency_ratio,
     ema,
     macd,
-    sma,
     slope,
+    sma,
     true_range,
     wilder_ema,
 )

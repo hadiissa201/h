@@ -19,6 +19,7 @@ Safety properties enforced here:
 
 from __future__ import annotations
 
+import contextlib
 from decimal import Decimal
 from typing import Any
 
@@ -292,7 +293,5 @@ class LiveExchangeAdapter(ExchangeAdapter):
         self._provider.close()
         client = self._private
         if client is not None and hasattr(client, "close"):
-            try:
+            with contextlib.suppress(Exception):  # best effort on shutdown
                 client.close()
-            except Exception:  # pragma: no cover - best effort
-                pass

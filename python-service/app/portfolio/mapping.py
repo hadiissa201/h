@@ -6,7 +6,7 @@ from app.models.enums import PositionSide, PositionStatus, TradingModeEnum
 from app.models.trading import Position, PositionExitPlan
 
 
-def position_from_record(record) -> Position:  # noqa: ANN001 - ORM row
+def position_from_record(record) -> Position:
     return Position(
         position_id=record.id,
         symbol=record.symbol,

@@ -121,9 +121,8 @@ class AIDecision(BaseModel):
         if isinstance(value, str):
             value = value.strip().rstrip("%")
             value = float(value)
-        if isinstance(value, (int, float)) and value > 1.0:
-            if value <= 100.0:
-                return float(value) / 100.0
+        if isinstance(value, int | float) and 1.0 < value <= 100.0:
+            return float(value) / 100.0
         return value
 
     @field_validator("strategy_alignment", "key_risks", mode="before")

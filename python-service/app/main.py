@@ -63,7 +63,7 @@ async def lifespan(app: FastAPI):
         with session_scope() as session:
             state = bootstrap_session(session, settings)
         log_event(logger, EventType.BOT_STARTED, message="bootstrap complete", **state)
-    except Exception as exc:  # noqa: BLE001 - must not block startup
+    except Exception as exc:
         logger.error(
             "bootstrap failed; service will report degraded health",
             extra={"event": str(EventType.SYSTEM_ERROR), "error": str(exc)},

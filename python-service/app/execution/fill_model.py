@@ -35,7 +35,7 @@ class CostModel:
     impact_bps_per_100k: Decimal = Decimal("2")
 
     @classmethod
-    def from_settings(cls, settings) -> CostModel:  # noqa: ANN001 - avoids import cycle
+    def from_settings(cls, settings) -> CostModel:
         return cls(
             taker_fee_bps=to_decimal(settings.paper_taker_fee_bps),
             maker_fee_bps=to_decimal(settings.paper_maker_fee_bps),

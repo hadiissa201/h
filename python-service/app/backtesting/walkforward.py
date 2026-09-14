@@ -56,7 +56,7 @@ class _Slice:
 
 def run_walkforward(
     request: WalkForwardRequest,
-    services,  # noqa: ANN001 - app.container.Services
+    services,
 ) -> WalkForwardResult:
     candles, source = load_candles(request.data, services.market_data)
     symbol = request.data.symbol.upper()

@@ -17,12 +17,12 @@ import pandas as pd
 from app.features.config import FeatureConfig
 from app.indicators import (
     adx,
-    efficiency_ratio,
     atr,
     atr_pct,
     bollinger_bands,
     breakouts,
     consecutive_closes,
+    efficiency_ratio,
     ema,
     macd,
     market_structure,

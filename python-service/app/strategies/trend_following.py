@@ -110,8 +110,13 @@ class TrendFollowingStrategy(Strategy):
             # stop under the last swing low is invalidation, an ATR stop is noise.
             stop = atr_stop
             used_structure = False
-            if structural_stop is not None and structural_stop < close:
-                if structural_stop > close - 3.0 * params.atr_stop_multiple * atr:
+            # Use the swing low only when it is both below price and close
+            # enough to be a sane stop rather than a disaster level.
+            if (
+                structural_stop is not None
+                and structural_stop < close
+                and structural_stop > close - 3.0 * params.atr_stop_multiple * atr
+            ):
                     stop = min(structural_stop * 0.999, atr_stop)
                     used_structure = structural_stop * 0.999 <= atr_stop
             target = target_from_r(close, stop, params.reward_multiple, SignalDirection.BUY)
@@ -152,8 +157,11 @@ class TrendFollowingStrategy(Strategy):
             structural_stop = row.get("last_swing_high")
             atr_stop = close + params.atr_stop_multiple * atr
             stop = atr_stop
-            if structural_stop is not None and structural_stop > close:
-                if structural_stop < close + 3.0 * params.atr_stop_multiple * atr:
+            if (
+                structural_stop is not None
+                and structural_stop > close
+                and structural_stop < close + 3.0 * params.atr_stop_multiple * atr
+            ):
                     stop = max(structural_stop * 1.001, atr_stop)
             target = target_from_r(
                 close, stop, params.reward_multiple, SignalDirection.SELL

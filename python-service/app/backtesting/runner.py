@@ -34,7 +34,7 @@ SYNTHETIC_WARNING = (
 )
 
 
-def load_candles(spec: BacktestDataSpec, market_data) -> tuple[pd.DataFrame, str]:  # noqa: ANN001
+def load_candles(spec: BacktestDataSpec, market_data) -> tuple[pd.DataFrame, str]:
     """Load candles for a backtest and report the effective source."""
     if spec.source == "csv":
         if not spec.csv_path:
@@ -75,7 +75,7 @@ def load_candles(spec: BacktestDataSpec, market_data) -> tuple[pd.DataFrame, str
 
 def build_config(
     request: BacktestRequest,
-    settings,  # noqa: ANN001
+    settings,
     spec_overrides: dict[str, Any] | None = None,
 ) -> BacktestConfig:
     feature_config = (
@@ -117,7 +117,7 @@ def build_config(
 
 def run_backtest(
     request: BacktestRequest,
-    services,  # noqa: ANN001 - app.container.Services
+    services,
     *,
     strategy_overrides: dict[str, dict[str, Any]] | None = None,
 ) -> BacktestResult:

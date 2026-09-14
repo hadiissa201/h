@@ -42,8 +42,18 @@ class UTCDateTime(TypeDecorator):
         return value.astimezone(UTC)
 
 
-# Money and quantities: 28 significant digits with 12 decimal places covers
-# satoshi-level quantities and eight-figure notionals without float drift.
-Money = Numeric(28, 12, asdecimal=True)
+# Money and quantities.
+#
+# Scale 8 is deliberate, not arbitrary: every monetary value in this system is
+# quantized to 8 decimal places by ``round_money`` before it is stored (satoshi
+# precision — finer than any spot lot size we trade). Storing at a *finer* scale
+# than the values actually carry buys nothing and costs exactness on SQLite,
+# which round-trips Decimals through floats: a clean 8-dp value read back at
+# scale 12 comes out as 9995.745819870001, and accounting assertions that should
+# balance to the cent start failing on dust.
+#
+# Postgres is exact either way; matching the scale to the contract keeps the test
+# backend faithful enough to catch real accounting drift.
+Money = Numeric(28, 8, asdecimal=True)
 
 JSONColumn = JSON().with_variant(JSONB, "postgresql")

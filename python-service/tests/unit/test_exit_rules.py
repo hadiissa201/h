@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-import pytest
-
 from app.models.enums import ExitReason, PositionSide
 from app.portfolio.exit_rules import (
     BarPrices,
