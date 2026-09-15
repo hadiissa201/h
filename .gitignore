@@ -21,17 +21,24 @@ htmlcov/
 .mypy_cache/
 
 # Local data
+#
+# These directory patterns MUST stay anchored with a leading slash. Unanchored,
+# `data/` matches at ANY depth -- which silently excluded the entire
+# python-service/app/data package (the market data service and its providers)
+# from every commit, and a fresh clone died with
+# `ModuleNotFoundError: No module named 'app.data'`.
+# tests/test_repo_integrity.py now fails if a source file is ignored like this.
 *.db
 *.sqlite
 *.sqlite3
-data/
-logs/
+/data/
+/logs/
 *.log
 
 # Backtest / research output
-reports/*.html
-reports/*.csv
-!reports/.gitkeep
+/reports/*.html
+/reports/*.csv
+!/reports/.gitkeep
 
 # Editors / OS
 .idea/
