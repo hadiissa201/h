@@ -323,11 +323,23 @@ information about real market performance, and the run emitted three warnings
 saying so: one position was still open at the end of the data, the LLM is not
 replayed, and spread/liquidity filters are not evaluated.
 
-**Your numbers will not match these**, and that is expected rather than a fault.
-The synthetic provider anchors its series to the current 5-minute bar, so the bar
-alignment shifts every five minutes and the path is regenerated after UTC midnight.
-Which symbol trades, how many backtest trades occur and what the P&L is all move
-between runs. What must not move is the list of *checks*: 39 pass, 0 fail.
+**Your numbers will probably not match these**, and the reason is worth knowing.
+The synthetic series is a pure function of absolute time: the bar at a given UTC
+timestamp always holds the same values. Two backtests over the same window return
+identical results. But the *window* moves -- a fetch takes the most recent N bars,
+so as the clock advances the oldest bars drop off and new ones arrive, and with
+them the trades. Run a backtest an hour later on 1h data and you are measuring a
+window shifted by one bar.
+
+What must not move is the list of *checks*. The count varies only with how many
+positions happened to be open (the per-position checks are conditional): every
+check that runs must pass, and 0 must fail.
+
+This was not always true. Until the absolute-time rewrite the generator laid its
+path down relative to "now", so advancing the clock by five minutes rewrote every
+historical bar and two consecutive backtests could differ by 20 trades and $57 of
+P&L. An earlier version of this section described that as expected behaviour. It
+was a bug, and it is fixed -- see `tests/unit/test_synthetic_provider.py`.
 
 ### Not verified
 

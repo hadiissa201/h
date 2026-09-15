@@ -8,13 +8,32 @@ the backtester attaches an explicit warning.
 
 Design notes that matter:
 
-* One 5-minute base path per symbol per day, resampled up to every requested
-  timeframe. Multi-timeframe features therefore describe *the same* market, which
-  a per-timeframe random walk would not.
+* One 5-minute base path per symbol, resampled up to every requested timeframe.
+  Multi-timeframe features therefore describe *the same* market, which a
+  per-timeframe random walk would not.
 * Each bar opens exactly where the previous bar closed (continuous 24/7 market),
   and OHLC ordering is guaranteed by construction.
 * Regime blocks cycle through trend / range / high-volatility phases so
   strategies and the regime classifier meet more than one world.
+
+**The path is a pure function of absolute time.** The bar at a given UTC
+timestamp always holds the same values, no matter when it is asked for or how
+many bars are requested around it. That is what lets a long-running process keep
+producing *fresh* candles as the clock advances without rewriting its own past.
+
+It was not always so. The original version laid a fixed-length random sequence
+down ending at "now", so advancing the clock by one 5-minute bar slid the whole
+series and changed every historical price (closes moved by >$1,000 on BTC). To
+hide that, the base frame was cached per UTC *day* -- which froze the newest
+candle at process start and made the feed read as ``STALE_DATA`` within minutes.
+Both faults have the same cause, and absolute indexing is the fix for both:
+
+* ``_absolute_index`` maps a timestamp to a bar number on a fixed epoch grid;
+* regime blocks are keyed on that absolute index, not on array position;
+* each block draws from its own seeded generator, so any window can be produced
+  without generating everything before it, and neighbouring windows agree exactly;
+* the level is anchored by subtracting a *trailing* mean (see ``_trailing_mean``),
+  which is causal, so anchoring cannot reach forward and destabilise the past.
 """
 
 from __future__ import annotations
@@ -36,15 +55,27 @@ BASE_SECONDS = 300
 # 400 days of 5m bars — enough for 1500 4h bars, cheap to generate vectorised.
 BASE_BARS = 115_200
 
+# Fixed grid origin. Every bar's identity is its offset from here, so the value
+# at a timestamp never depends on when it was generated. Changing this constant
+# regenerates every synthetic series, so don't.
+EPOCH = pd.Timestamp("2020-01-01", tz="UTC")
+
 # (name, per-bar drift, per-bar volatility) applied in blocks.
+#
+# The drifts sum to zero over one full cycle on purpose. They did not originally
+# (+0.00008/bar), which was harmless while the series was always regenerated at a
+# fixed length, but on an absolute grid a residual drift compounds without limit:
+# by 2030 it would put BTC in the billions. A fixture that has to stay usable for
+# years must be level-stationary; the per-block trends are unchanged in character.
 _REGIME_BLOCKS = (
-    ("uptrend", 0.00012, 0.0022),
-    ("range", 0.00000, 0.0014),
-    ("downtrend", -0.00011, 0.0026),
-    ("high_vol_range", 0.00002, 0.0050),
-    ("slow_grind_up", 0.00005, 0.0010),
+    ("uptrend", 0.000104, 0.0022),
+    ("range", -0.000016, 0.0014),
+    ("downtrend", -0.000126, 0.0026),
+    ("high_vol_range", 0.000004, 0.0050),
+    ("slow_grind_up", 0.000034, 0.0010),
 )
 _BLOCK_BARS = 2_880  # 10 days of 5m bars per regime block
+_SUB_STEPS = 4  # intra-bar path points, used to build a true high/low
 
 _BASE_PRICES = {
     "BTC/USDT": 62_000.0,
@@ -79,6 +110,9 @@ class SyntheticMarketDataProvider(MarketDataProvider):
         self.seed = seed
         self.base_prices = {**_BASE_PRICES, **(base_prices or {})}
         self.base_bars = base_bars
+        # Warm-up length for the level anchor. Equal to the visible history, so a
+        # returned bar's anchor never depends on where generation happened to start.
+        self.anchor_bars = base_bars
         self._base_cache: dict[tuple[str, int], pd.DataFrame] = {}
 
     # ------------------------------------------------------------------ public
@@ -190,37 +224,47 @@ class SyntheticMarketDataProvider(MarketDataProvider):
         return resampled
 
     def _base_frame(self, symbol: str) -> pd.DataFrame:
-        # Keyed by UTC day so a long-running process sees a stable path within a
-        # day and a fresh one after midnight.
-        anchor = int(floor_to_timeframe(utcnow(), "1d").timestamp())
-        key = (symbol.upper(), anchor)
+        """The 5m path ending at the newest *started* bar.
+
+        Keyed on that bar, so the feed advances with the clock. Regenerating is
+        safe precisely because the path is absolute: the bars a previous call
+        returned come back bit-identical, and only new ones are added.
+        """
+        end_index = _absolute_index(floor_to_timeframe(utcnow(), BASE_TIMEFRAME))
+        key = (symbol.upper(), end_index)
         cached = self._base_cache.get(key)
         if cached is None:
-            cached = self._generate_base(symbol)
-            self._base_cache = {key: cached}  # only ever keep the current day
+            cached = self._generate_base(symbol, end_index)
+            self._base_cache = {key: cached}  # only ever keep the newest bar
         return cached
 
-    def _generate_base(self, symbol: str) -> pd.DataFrame:
+    def _generate_base(self, symbol: str, end_index: int) -> pd.DataFrame:
+        """Build ``base_bars`` 5m candles ending at absolute bar ``end_index``."""
         spec = self._spec(symbol)
         count = self.base_bars
-        sub_steps = 4
-        rng = np.random.default_rng(spec.seed)
 
-        block_index = (np.arange(count) // _BLOCK_BARS) % len(_REGIME_BLOCKS)
-        drifts = np.array([block[1] for block in _REGIME_BLOCKS])[block_index]
-        vols = np.array([block[2] for block in _REGIME_BLOCKS])[block_index]
+        # Warm-up ahead of the returned window so every returned bar sees a full
+        # anchoring window (see _trailing_mean). Without it the oldest bars would
+        # be anchored on a shorter window and would shift as the clock advanced.
+        warmup = self.anchor_bars
+        total = count + warmup
+        start_index = end_index - total + 1
 
-        shocks = rng.normal(
-            loc=(drifts / sub_steps)[:, None],
-            scale=(vols / np.sqrt(sub_steps))[:, None],
-            size=(count, sub_steps),
-        )
-        log_path = np.log(spec.base_price) + np.cumsum(shocks.reshape(-1))
-        prices = np.exp(log_path).reshape(count, sub_steps)
+        shocks, vol_draws = _draw_range(spec, start_index, total)
+
+        # Anchor the level. `walk` is a free random walk, so on an absolute grid
+        # it wanders as sqrt(time) without bound; subtracting its own trailing
+        # mean removes only that very-low-frequency wander. The subtracted term
+        # moves by ~1e-5 per bar against a per-bar vol of ~2.5e-3, so local
+        # dynamics -- returns, ATR, every indicator -- are untouched.
+        walk = np.cumsum(shocks.reshape(-1)).reshape(total, _SUB_STEPS)
+        anchor = _trailing_mean(walk[:, -1], warmup)
+        log_path = np.log(spec.base_price) + walk - anchor[:, None]
+        prices = np.exp(log_path)
 
         closes = prices[:, -1]
-        opens = np.empty(count)
-        opens[0] = spec.base_price
+        opens = np.empty(total)
+        opens[0] = float(np.exp(np.log(spec.base_price) + walk[0, 0] - anchor[0]))
         opens[1:] = closes[:-1]  # continuous market: open == previous close
         highs = np.maximum(prices.max(axis=1), opens)
         lows = np.minimum(prices.min(axis=1), opens)
@@ -231,15 +275,11 @@ class SyntheticMarketDataProvider(MarketDataProvider):
         # starves every volume-confirmed strategy of signals.
         moves = np.abs(closes / opens - 1.0)
         typical_volume = 5_000_000.0 / spec.base_price
-        baseline = rng.lognormal(mean=np.log(typical_volume), sigma=0.55, size=count)
+        baseline = np.exp(np.log(typical_volume) + 0.55 * vol_draws["baseline"])
         move_coupling = 1.0 + 40.0 * moves
-        spikes = np.where(
-            rng.random(count) < 0.04, rng.uniform(2.0, 5.0, size=count), 1.0
-        )
+        spikes = np.where(vol_draws["spike_u"] < 0.04, vol_draws["spike_size"], 1.0)
         volumes = np.maximum(1.0, baseline * move_coupling * spikes)
 
-        end = floor_to_timeframe(utcnow(), BASE_TIMEFRAME)
-        index = pd.date_range(end=end, periods=count, freq=f"{BASE_SECONDS}s", tz="UTC")
         frame = pd.DataFrame(
             {
                 "open": opens,
@@ -248,10 +288,11 @@ class SyntheticMarketDataProvider(MarketDataProvider):
                 "close": closes,
                 "volume": volumes,
             },
-            index=index,
+            index=_index_for_range(start_index, total),
         )
         frame.index.name = "timestamp"
-        return frame
+        # Drop the warm-up: it exists only to give the anchor a full window.
+        return frame.iloc[warmup:]
 
     def _spec(self, symbol: str) -> _SeriesSpec:
         symbol = symbol.upper()
@@ -260,3 +301,81 @@ class SyntheticMarketDataProvider(MarketDataProvider):
         digest = zlib.crc32(symbol.encode())
         base_price = self.base_prices.get(symbol, 50.0 + (digest % 5000) / 10.0)
         return _SeriesSpec(base_price=base_price, seed=self.seed + (digest % 10_000))
+
+
+# ------------------------------------------------------------------- absolute grid
+def _absolute_index(moment) -> int:
+    """Bar number of ``moment`` on the fixed 5m grid anchored at ``EPOCH``."""
+    ts = pd.Timestamp(moment)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize("UTC")
+    return int((ts - EPOCH).total_seconds()) // BASE_SECONDS
+
+
+def _index_for_range(start_index: int, count: int) -> pd.DatetimeIndex:
+    start = EPOCH + pd.Timedelta(seconds=start_index * BASE_SECONDS)
+    return pd.date_range(
+        start=start, periods=count, freq=f"{BASE_SECONDS}s", tz="UTC"
+    )
+
+
+def _trailing_mean(values: np.ndarray, window: int) -> np.ndarray:
+    """Causal rolling mean; expanding until ``window`` samples exist.
+
+    Causal matters here. A centred window would make a bar's value depend on bars
+    after it, so the past would change every time the clock advanced -- exactly
+    the fault this rewrite removes.
+    """
+    cumulative = np.concatenate(([0.0], np.cumsum(values)))
+    positions = np.arange(len(values))
+    lower = np.maximum(0, positions - window + 1)
+    counts = positions - lower + 1
+    return (cumulative[positions + 1] - cumulative[lower]) / counts
+
+
+def _draw_range(
+    spec: _SeriesSpec, start_index: int, count: int
+) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+    """Draw shocks and volume components for an absolute index range.
+
+    Each regime block owns independent generators seeded from ``(seed, block)``,
+    so a window can be produced without generating everything before it and two
+    overlapping windows agree exactly. Separate streams per component matter too:
+    sharing one stream would make every draw depend on how many values earlier
+    draws had consumed, which reintroduces length-dependence through the back door.
+    """
+    first_block = (start_index) // _BLOCK_BARS
+    last_block = (start_index + count - 1) // _BLOCK_BARS
+
+    shock_parts: list[np.ndarray] = []
+    baseline_parts: list[np.ndarray] = []
+    spike_u_parts: list[np.ndarray] = []
+    spike_size_parts: list[np.ndarray] = []
+
+    for block in range(first_block, last_block + 1):
+        _, drift, vol = _REGIME_BLOCKS[block % len(_REGIME_BLOCKS)]
+        # A window opening before EPOCH yields negative block numbers, and
+        # SeedSequence rejects negative entropy. Wrapping keeps the seed distinct
+        # per block (injective for any |block| < 2**31) and leaves every
+        # non-negative block's value untouched.
+        block_seed = block % (2**32)
+
+        price_rng = np.random.default_rng([spec.seed, block_seed, 0])
+        raw = price_rng.standard_normal((_BLOCK_BARS, _SUB_STEPS))
+        shock_parts.append(drift / _SUB_STEPS + raw * (vol / np.sqrt(_SUB_STEPS)))
+
+        volume_rng = np.random.default_rng([spec.seed, block_seed, 1])
+        baseline_parts.append(volume_rng.standard_normal(_BLOCK_BARS))
+        spike_u_parts.append(volume_rng.random(_BLOCK_BARS))
+        spike_size_parts.append(volume_rng.uniform(2.0, 5.0, size=_BLOCK_BARS))
+
+    offset = start_index - first_block * _BLOCK_BARS
+    window = slice(offset, offset + count)
+    return (
+        np.concatenate(shock_parts)[window],
+        {
+            "baseline": np.concatenate(baseline_parts)[window],
+            "spike_u": np.concatenate(spike_u_parts)[window],
+            "spike_size": np.concatenate(spike_size_parts)[window],
+        },
+    )
