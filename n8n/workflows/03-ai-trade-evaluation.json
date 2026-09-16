@@ -39,7 +39,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// Reject calls that do not carry the shared internal secret. These webhooks are\n// reachable from anywhere n8n is reachable, so an unauthenticated caller must not\n// be able to push a trade into the pipeline.\nconst expected = ($env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret');\nconst items = $input.all();\nconst out = [];\nfor (const item of items) {\n  const headers = item.json.headers || {};\n  const supplied = headers['x-workflow-secret'] || headers['X-Workflow-Secret'];\n  if (!supplied || supplied !== expected) {\n    throw new Error('unauthorized: missing or invalid x-workflow-secret header');\n  }\n  const body = item.json.body || item.json;\n  if (!body.symbol) { throw new Error('symbol is required'); }\n  out.push({ json: body });\n}\nreturn out;\n"
+        "jsCode": "// Reject calls that do not carry the shared internal secret. These webhooks are\n// reachable from anywhere n8n is reachable, so an unauthenticated caller must not\n// be able to push a trade into the pipeline.\nconst expected = ($env.WORKFLOW_SECRET || $env.SERVICE_API_KEY);\nconst items = $input.all();\nconst out = [];\nfor (const item of items) {\n  const headers = item.json.headers || {};\n  const supplied = headers['x-workflow-secret'] || headers['X-Workflow-Secret'];\n  if (!supplied || supplied !== expected) {\n    throw new Error('unauthorized: missing or invalid x-workflow-secret header');\n  }\n  const body = item.json.body || item.json;\n  if (!body.symbol) { throw new Error('symbol is required'); }\n  out.push({ json: body });\n}\nreturn out;\n"
       },
       "id": "5449013a-f1b9-5057-8cc6-862d169ebd87",
       "name": "Validate request",
@@ -153,7 +153,7 @@
           "parameters": [
             {
               "name": "x-workflow-secret",
-              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret' }}"
+              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY }}"
             }
           ]
         },

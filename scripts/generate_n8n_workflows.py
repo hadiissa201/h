@@ -42,8 +42,15 @@ API = "={{ $env.TRADING_API_BASE_URL || 'http://python-trading-service:8000' }}"
 HOOK = "={{ $env.N8N_WEBHOOK_URL || 'http://localhost:5678/' }}webhook/"
 # Shared secret for internal workflow-to-workflow calls. Same value as the API key
 # by default; set WORKFLOW_SECRET to separate them.
-SECRET = "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret' }}"
-SECRET_JS = "($env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret')"
+#
+# There is deliberately NO literal fallback. An earlier version fell back to
+# 'dev-secret' when neither variable was set, which is the worst possible
+# behaviour: caller and receiver both used it, so the chain worked perfectly while
+# every internal webhook was in practice guarded by a string published in this
+# repository. Anyone who could reach n8n could inject a trade proposal. Missing
+# configuration must break loudly, not quietly authorise strangers.
+SECRET = "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY }}"
+SECRET_JS = "($env.WORKFLOW_SECRET || $env.SERVICE_API_KEY)"
 
 CREDENTIAL = {
     "httpHeaderAuth": {

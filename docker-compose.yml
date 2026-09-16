@@ -120,8 +120,24 @@ services:
       N8N_RUNNERS_ENABLED: "true"
       EXECUTIONS_DATA_PRUNE: "true"
       EXECUTIONS_DATA_MAX_AGE: "336"
-      # Convenience for the imported workflows: the base URL of this service.
+      # --- what the imported workflows read via $env
+      #
+      # Listed explicitly rather than `env_file: [.env]` on purpose. Bulk-loading
+      # .env would hand the n8n container EXCHANGE_API_KEY and EXCHANGE_API_SECRET,
+      # which it has no use for; n8n orchestrates, the Python service trades.
+      # Least privilege applies to our own containers too.
+      #
+      # SERVICE_API_KEY is the shared secret guarding the internal
+      # workflow-to-workflow webhooks. If it is unset the guards fail closed and
+      # the chain stops -- that is intended. It must never silently fall back to a
+      # default, or those webhooks would accept anything.
       TRADING_API_BASE_URL: http://python-trading-service:8000
+      SERVICE_API_KEY: ${SERVICE_API_KEY:?set SERVICE_API_KEY in .env}
+      WORKFLOW_SECRET: ${WORKFLOW_SECRET:-}
+      TRADING_SYMBOLS: ${TRADING_SYMBOLS:-BTC/USDT,ETH/USDT,SOL/USDT}
+      PRIMARY_TIMEFRAME: ${PRIMARY_TIMEFRAME:-1h}
+      NOTIFY_WEBHOOK_URL: ${NOTIFY_WEBHOOK_URL:-}
+      EMERGENCY_FLATTEN: ${EMERGENCY_FLATTEN:-}
     volumes:
       - n8n-data:/home/node/.n8n
       # Workflow JSON is mounted read-only for import:

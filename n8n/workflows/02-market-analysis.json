@@ -61,7 +61,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const expected = ($env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret');\nconst first = $input.first()?.json ?? {};\nif (first.headers) {\n  const supplied = first.headers['x-workflow-secret'] || first.headers['X-Workflow-Secret'];\n  if (!supplied || supplied !== expected) {\n    throw new Error('unauthorized: missing or invalid x-workflow-secret header');\n  }\n}\n\n// Symbols come from the caller, or fall back to the configured universe.\nconst configured = ($env.TRADING_SYMBOLS || 'BTC/USDT,ETH/USDT,SOL/USDT')\n  .split(',').map((s) => s.trim()).filter(Boolean);\nconst first = $input.first()?.json ?? {};\nconst body = first.body || first;\nconst symbols = Array.isArray(body.symbols) && body.symbols.length ? body.symbols : configured;\nconst timeframe = body.timeframe || $env.PRIMARY_TIMEFRAME || '1h';\nreturn symbols.map((symbol) => ({ json: { symbol, timeframe } }));\n"
+        "jsCode": "const expected = ($env.WORKFLOW_SECRET || $env.SERVICE_API_KEY);\nconst first = $input.first()?.json ?? {};\nif (first.headers) {\n  const supplied = first.headers['x-workflow-secret'] || first.headers['X-Workflow-Secret'];\n  if (!supplied || supplied !== expected) {\n    throw new Error('unauthorized: missing or invalid x-workflow-secret header');\n  }\n}\n\n// Symbols come from the caller, or fall back to the configured universe.\nconst configured = ($env.TRADING_SYMBOLS || 'BTC/USDT,ETH/USDT,SOL/USDT')\n  .split(',').map((s) => s.trim()).filter(Boolean);\nconst first = $input.first()?.json ?? {};\nconst body = first.body || first;\nconst symbols = Array.isArray(body.symbols) && body.symbols.length ? body.symbols : configured;\nconst timeframe = body.timeframe || $env.PRIMARY_TIMEFRAME || '1h';\nreturn symbols.map((symbol) => ({ json: { symbol, timeframe } }));\n"
       },
       "id": "bb4955d2-5605-5287-bfac-cd8a65a94284",
       "name": "Resolve symbols",
@@ -175,7 +175,7 @@
           "parameters": [
             {
               "name": "x-workflow-secret",
-              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret' }}"
+              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY }}"
             }
           ]
         },

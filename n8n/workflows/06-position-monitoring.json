@@ -120,7 +120,7 @@
           "parameters": [
             {
               "name": "x-workflow-secret",
-              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret' }}"
+              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY }}"
             }
           ]
         },
@@ -328,7 +328,7 @@
           "parameters": [
             {
               "name": "x-workflow-secret",
-              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret' }}"
+              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY }}"
             }
           ]
         },

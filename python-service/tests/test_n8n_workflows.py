@@ -314,3 +314,48 @@ def test_failure_paths_report_errors(workflows: dict[str, dict]) -> None:
         assert any("/workflow/error" in url for url in urls), (
             f"{filename} has no error-reporting path"
         )
+
+
+def test_the_shared_secret_has_no_literal_fallback() -> None:
+    """A missing secret must break the chain, not quietly authorise everyone.
+
+    Regression: the guards resolved to ``$env.WORKFLOW_SECRET ||
+    $env.SERVICE_API_KEY || 'dev-secret'``. Because caller and receiver shared the
+    same fallback, an unconfigured deployment worked perfectly while every
+    internal webhook was guarded by a string published in this repository —
+    anyone who could reach n8n could inject a trade proposal into the pipeline.
+    Fail-closed is the only acceptable behaviour for an auth check.
+    """
+    # A literal fallback looks like `$env.SERVICE_API_KEY || 'dev-secret'`: an env
+    # lookup whose next `||` operand is a quoted string.
+    literal_fallback = re.compile(
+        r"\$env\.(?:WORKFLOW_SECRET|SERVICE_API_KEY)\s*\|\|\s*(?:\\?[\"'])"
+    )
+    offenders: list[str] = []
+    for path in workflow_files():
+        for match in literal_fallback.finditer(path.read_text(encoding="utf-8")):
+            offenders.append(f"{path.name}: ...{match.group(0)}...")
+
+    assert not offenders, "hardcoded secret fallback found:\n  " + "\n  ".join(offenders)
+
+
+def test_compose_gives_n8n_the_secret_but_not_exchange_credentials() -> None:
+    """n8n orchestrates; it never needs keys that can move money."""
+    compose = (Path(__file__).resolve().parents[2] / "docker-compose.yml").read_text(
+        encoding="utf-8"
+    )
+    # Comments explain why these are excluded and would match the check itself.
+    settings = "\n".join(
+        line for line in compose.splitlines() if not line.lstrip().startswith("#")
+    )
+    n8n_block = settings.split("  n8n:", 1)[1]
+
+    assert "SERVICE_API_KEY:" in n8n_block, (
+        "n8n cannot authenticate the internal webhooks without SERVICE_API_KEY"
+    )
+    assert "TRADING_API_BASE_URL:" in n8n_block
+    for forbidden in ("EXCHANGE_API_KEY", "EXCHANGE_API_SECRET", "EXCHANGE_PASSWORD"):
+        assert forbidden not in n8n_block, f"n8n must not receive {forbidden}"
+    assert "env_file" not in n8n_block, (
+        "bulk-loading .env would hand n8n the exchange credentials; list vars explicitly"
+    )

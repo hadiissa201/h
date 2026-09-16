@@ -85,8 +85,13 @@ webhooks only accept calls while the workflow is active).
 | `NOTIFY_WEBHOOK_URL` | Slack/Discord/Teams incoming webhook for alerts | unset (notifications skipped) |
 | `EMERGENCY_FLATTEN` | `true` closes positions on an emergency halt | unset (positions kept) |
 
-To use these inside n8n, add `env_file: [.env]` to the n8n service or set them in
-`docker-compose.yml`.
+These are passed to the n8n container by `docker-compose.yml`, which lists them
+explicitly rather than bulk-loading `.env` — n8n has no business holding exchange
+credentials.
+
+`SERVICE_API_KEY` is required: compose refuses to start without it, and the
+webhook guards fail closed if it is missing, so the workflow chain stops rather
+than accepting unauthenticated calls.
 
 ## Why webhooks instead of Execute Workflow nodes
 

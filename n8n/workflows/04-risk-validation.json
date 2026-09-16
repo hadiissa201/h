@@ -39,7 +39,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "// Reject calls that do not carry the shared internal secret. These webhooks are\n// reachable from anywhere n8n is reachable, so an unauthenticated caller must not\n// be able to push a trade into the pipeline.\nconst expected = ($env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret');\nconst items = $input.all();\nconst out = [];\nfor (const item of items) {\n  const headers = item.json.headers || {};\n  const supplied = headers['x-workflow-secret'] || headers['X-Workflow-Secret'];\n  if (!supplied || supplied !== expected) {\n    throw new Error('unauthorized: missing or invalid x-workflow-secret header');\n  }\n  const body = item.json.body || item.json;\n  if (!body.proposal) { throw new Error('proposal is required'); }\n  out.push({ json: body });\n}\nreturn out;\n"
+        "jsCode": "// Reject calls that do not carry the shared internal secret. These webhooks are\n// reachable from anywhere n8n is reachable, so an unauthenticated caller must not\n// be able to push a trade into the pipeline.\nconst expected = ($env.WORKFLOW_SECRET || $env.SERVICE_API_KEY);\nconst items = $input.all();\nconst out = [];\nfor (const item of items) {\n  const headers = item.json.headers || {};\n  const supplied = headers['x-workflow-secret'] || headers['X-Workflow-Secret'];\n  if (!supplied || supplied !== expected) {\n    throw new Error('unauthorized: missing or invalid x-workflow-secret header');\n  }\n  const body = item.json.body || item.json;\n  if (!body.proposal) { throw new Error('proposal is required'); }\n  out.push({ json: body });\n}\nreturn out;\n"
       },
       "id": "c22ef572-934a-5333-87cb-b64f8d25ac31",
       "name": "Validate request",
@@ -142,7 +142,7 @@
           "parameters": [
             {
               "name": "x-workflow-secret",
-              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret' }}"
+              "value": "={{ $env.WORKFLOW_SECRET || $env.SERVICE_API_KEY }}"
             }
           ]
         },

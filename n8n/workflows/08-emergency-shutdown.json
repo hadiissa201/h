@@ -61,7 +61,7 @@
     {
       "parameters": {
         "mode": "runOnceForAllItems",
-        "jsCode": "const expected = ($env.WORKFLOW_SECRET || $env.SERVICE_API_KEY || 'dev-secret');\nconst first = $input.first()?.json ?? {};\nif (first.headers) {\n  const supplied = first.headers['x-workflow-secret'] || first.headers['X-Workflow-Secret'];\n  if (!supplied || supplied !== expected) {\n    throw new Error('unauthorized: missing or invalid x-workflow-secret header');\n  }\n}\n\nconst first = $input.first()?.json ?? {};\nconst body = first.body || first;\nreturn [{ json: {\n  reason: body.reason || 'MANUAL',\n  detail: body.detail || 'scheduled safety sweep',\n  source: body.source || 'workflow-08',\n  explicit: Boolean(body.reason),\n} }];\n"
+        "jsCode": "const expected = ($env.WORKFLOW_SECRET || $env.SERVICE_API_KEY);\nconst first = $input.first()?.json ?? {};\nif (first.headers) {\n  const supplied = first.headers['x-workflow-secret'] || first.headers['X-Workflow-Secret'];\n  if (!supplied || supplied !== expected) {\n    throw new Error('unauthorized: missing or invalid x-workflow-secret header');\n  }\n}\n\nconst first = $input.first()?.json ?? {};\nconst body = first.body || first;\nreturn [{ json: {\n  reason: body.reason || 'MANUAL',\n  detail: body.detail || 'scheduled safety sweep',\n  source: body.source || 'workflow-08',\n  explicit: Boolean(body.reason),\n} }];\n"
       },
       "id": "7f1aa1ce-e9ff-565c-8e75-adf1a82b23da",
       "name": "Normalise trigger",
