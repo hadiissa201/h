@@ -123,7 +123,7 @@ def main() -> int:
         print("\n*** SYNTHETIC DATA — every number below is meaningless. ***")
 
     days = args.limit * BAR_SECONDS.get(args.timeframe, 3600) / 86400.0
-    print(f"Window  : {args.limit} x {args.timeframe} bars (~{days:.0f} days per symbol)\n")
+    print(f"Window  : {args.limit} x {args.timeframe} bars requested (~{days:.0f} days)\n")
 
     # --------------------------------------------------------------- backtests
     rows: list[dict[str, Any]] = []
@@ -152,6 +152,13 @@ def main() -> int:
             continue
 
         metrics = result.get("metrics", {})
+        delivered = result.get("bars") or 0
+        if delivered < args.limit * 0.9:
+            print(
+                f"    NOTE: asked for {args.limit} bars, got {delivered}"
+                f" (~{delivered * BAR_SECONDS.get(args.timeframe, 3600) / 86400.0:.0f}"
+                " days). The exchange has no more history for this symbol."
+            )
         rows.append(
             {
                 "symbol": symbol,

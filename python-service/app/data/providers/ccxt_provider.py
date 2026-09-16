@@ -18,9 +18,17 @@ from app.core.logging import get_logger
 from app.data.providers.base import MarketDataProvider
 from app.models.market import OrderBook, OrderBookLevel, Ticker
 from app.models.trading import SymbolSpec
-from app.utils.time import ensure_utc, utcnow
+from app.utils.time import ensure_utc, timeframe_to_seconds, utcnow
 
 logger = get_logger(__name__)
+
+# Largest OHLCV page any mainstream exchange will return. Exchanges silently cap
+# rather than erroring, so this is the paging unit, not a guarantee.
+_MAX_CANDLES_PER_REQUEST = 1000
+# Hard stop on the paging loop. 200 pages x 1000 candles is far more history than
+# any backtest here needs, and it guarantees a misbehaving exchange cannot hang
+# the service.
+_MAX_PAGES = 200
 
 
 class CcxtMarketDataProvider(MarketDataProvider):
@@ -70,33 +78,88 @@ class CcxtMarketDataProvider(MarketDataProvider):
         limit: int = 300,
         since: int | None = None,
     ) -> pd.DataFrame:
+        """Fetch ``limit`` closed candles, paging when that exceeds one request.
+
+        Exchanges cap a single OHLCV response (Binance at 1000 candles, others
+        lower) and simply return fewer rows rather than erroring. Asking for 5000
+        therefore used to yield ~800 silently -- about a month of hourly data
+        presented as if it were the seven months requested. Every backtest run
+        that way was measuring a sample far too small to mean anything, and
+        nothing in the output said so.
+
+        Paging forward from a computed start makes the requested size real. Note
+        the exchange remains free to return less when the history does not exist
+        (a recently listed symbol); the caller sees the true count in ``bars``.
+        """
         self._load_markets()
-        try:
-            raw = self._exchange.fetch_ohlcv(
-                symbol, timeframe=timeframe, since=since, limit=limit
-            )
-        except Exception as exc:
-            raise MarketDataError(
-                f"fetch_ohlcv failed for {symbol} {timeframe}: {exc}",
-                symbol=symbol,
-                timeframe=timeframe,
-                exchange=self.exchange_id,
-            ) from exc
-        if not raw:
+        bar_ms = timeframe_to_seconds(timeframe) * 1000
+        # Fetch one extra: the newest candle is still forming and gets dropped.
+        wanted = limit + 1
+        cursor = since
+        if cursor is None and wanted > _MAX_CANDLES_PER_REQUEST:
+            # Reach back far enough to land `wanted` bars ending at now.
+            cursor = int(utcnow().timestamp() * 1000) - wanted * bar_ms
+
+        rows: list[list[float]] = []
+        seen_pages = 0
+        while True:
+            seen_pages += 1
+            if seen_pages > _MAX_PAGES:
+                logger.warning(
+                    "stopped paging OHLCV at the page cap",
+                    extra={
+                        "symbol": symbol,
+                        "timeframe": timeframe,
+                        "pages": seen_pages,
+                        "rows": len(rows),
+                    },
+                )
+                break
+
+            page_size = min(_MAX_CANDLES_PER_REQUEST, wanted - len(rows))
+            try:
+                page = self._exchange.fetch_ohlcv(
+                    symbol, timeframe=timeframe, since=cursor, limit=page_size
+                )
+            except Exception as exc:
+                raise MarketDataError(
+                    f"fetch_ohlcv failed for {symbol} {timeframe}: {exc}",
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    exchange=self.exchange_id,
+                ) from exc
+
+            if not page:
+                break
+            rows.extend(page)
+            if len(rows) >= wanted:
+                break
+
+            # Advance past the last candle received. If the exchange did not move
+            # forward, the history is exhausted -- stop rather than spin.
+            next_cursor = int(page[-1][0]) + bar_ms
+            if cursor is not None and next_cursor <= cursor:
+                break
+            cursor = next_cursor
+
+        if not rows:
             raise MarketDataError(
                 f"empty OHLCV response for {symbol} {timeframe}",
                 symbol=symbol,
                 timeframe=timeframe,
             )
+
         frame = pd.DataFrame(
-            raw, columns=["timestamp", "open", "high", "low", "close", "volume"]
+            rows, columns=["timestamp", "open", "high", "low", "close", "volume"]
         )
         frame["timestamp"] = pd.to_datetime(frame["timestamp"], unit="ms", utc=True)
         frame = frame.set_index("timestamp").astype(float)
         frame = frame[~frame.index.duplicated(keep="last")].sort_index()
         # Exchanges include the in-progress candle; drop it so no strategy ever
         # sees a partial bar.
-        return frame.iloc[:-1] if len(frame) > 1 else frame
+        if len(frame) > 1:
+            frame = frame.iloc[:-1]
+        return frame.tail(limit)
 
     def fetch_ticker(self, symbol: str) -> Ticker:
         self._load_markets()
