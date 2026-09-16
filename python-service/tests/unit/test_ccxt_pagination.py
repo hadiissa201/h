@@ -174,3 +174,52 @@ def test_paging_cannot_loop_forever(provider, monkeypatch):
 
     assert len(stuck.calls) <= 6
     assert len(frame) >= 1
+
+
+# ------------------------------------------------------- request-count budget
+# Paging is only worth having if it cannot cost more requests than it needs. The
+# first version issued speculative follow-ups whenever a page came back short,
+# which is the normal case: a live tick asking for 268 bars turned into a stream
+# of tiny calls, each paying the rate limiter, until Binance began refusing them.
+# One tick took 70 minutes and two symbols failed outright.
+
+
+def test_a_live_sized_request_costs_exactly_one_call(provider):
+    """The loop's own request, every few minutes, on every symbol."""
+    instance, fake = provider(available=20_000)
+
+    instance.fetch_ohlcv("BTC/USDT", "1h", limit=268)
+
+    assert len(fake.calls) == 1, (
+        f"a single-page request made {len(fake.calls)} calls; "
+        "this is what got the IP rate-limited"
+    )
+
+
+def test_a_short_page_ends_paging_immediately(provider):
+    """Fewer rows than asked for means the exchange has no more. Stop."""
+
+    class ShortPageExchange(FakeExchange):
+        def fetch_ohlcv(self, symbol, timeframe=None, since=None, limit=None):
+            page = super().fetch_ohlcv(symbol, timeframe, since, limit)
+            return page[:-1] if len(page) > 1 else page  # always one short
+
+    instance, _ = provider(available=20_000)
+    short = ShortPageExchange(available=20_000)
+    instance._exchange = short
+
+    instance.fetch_ohlcv("BTC/USDT", "1h", limit=5_000)
+
+    assert len(short.calls) <= 6, (
+        f"short pages triggered {len(short.calls)} calls; must stop, not chase"
+    )
+
+
+def test_a_large_request_costs_about_what_it_must(provider):
+    instance, fake = provider(available=40_000)
+
+    frame = instance.fetch_ohlcv("BTC/USDT", "1h", limit=15_000)
+
+    assert len(frame) == 15_000
+    # 15001 bars at 1000 per page is 16 calls; allow a little slack, not 200.
+    assert len(fake.calls) <= 20, f"{len(fake.calls)} calls for 15000 bars"

@@ -96,6 +96,13 @@ class CcxtMarketDataProvider(MarketDataProvider):
         # Fetch one extra: the newest candle is still forming and gets dropped.
         wanted = limit + 1
         cursor = since
+
+        # Anything that fits in one response is one response. The live loop asks
+        # for a few hundred bars every few minutes; it must not pay for paging
+        # machinery it cannot use, and it must not issue speculative follow-up
+        # requests against an exchange that rate-limits.
+        if cursor is None and wanted <= _MAX_CANDLES_PER_REQUEST:
+            return self._single_page(symbol, timeframe, wanted, limit)
         if cursor is None and wanted > _MAX_CANDLES_PER_REQUEST:
             # Reach back far enough to land `wanted` bars ending at now.
             cursor = int(utcnow().timestamp() * 1000) - wanted * bar_ms
@@ -135,6 +142,13 @@ class CcxtMarketDataProvider(MarketDataProvider):
             if len(rows) >= wanted:
                 break
 
+            # A short page means the exchange has nothing further -- it returns
+            # what it has rather than erroring. Continuing here is what turned a
+            # single 268-bar request into a stream of tiny follow-up calls, each
+            # paying the rate limiter, until Binance started refusing them.
+            if len(page) < page_size:
+                break
+
             # Advance past the last candle received. If the exchange did not move
             # forward, the history is exhausted -- stop rather than spin.
             next_cursor = int(page[-1][0]) + bar_ms
@@ -142,13 +156,31 @@ class CcxtMarketDataProvider(MarketDataProvider):
                 break
             cursor = next_cursor
 
+        return self._to_frame(rows, symbol, timeframe, limit)
+
+    def _single_page(
+        self, symbol: str, timeframe: str, wanted: int, limit: int
+    ) -> pd.DataFrame:
+        try:
+            raw = self._exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=wanted)
+        except Exception as exc:
+            raise MarketDataError(
+                f"fetch_ohlcv failed for {symbol} {timeframe}: {exc}",
+                symbol=symbol,
+                timeframe=timeframe,
+                exchange=self.exchange_id,
+            ) from exc
+        return self._to_frame(raw, symbol, timeframe, limit)
+
+    def _to_frame(
+        self, rows: list, symbol: str, timeframe: str, limit: int
+    ) -> pd.DataFrame:
         if not rows:
             raise MarketDataError(
                 f"empty OHLCV response for {symbol} {timeframe}",
                 symbol=symbol,
                 timeframe=timeframe,
             )
-
         frame = pd.DataFrame(
             rows, columns=["timestamp", "open", "high", "low", "close", "volume"]
         )
