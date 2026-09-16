@@ -14,10 +14,23 @@ from __future__ import annotations
 
 import functools
 from decimal import Decimal
+from pathlib import Path
 from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+# .env is located from the package, never from the current directory.
+#
+# A bare ``env_file=".env"`` resolves against the working directory, so the file
+# the README tells you to create at the repo root was silently ignored whenever
+# the service was started from python-service/ -- which is where you start it.
+# The result was a service that booted with every default instead of your
+# settings, and nothing said so. Both locations are read, repo root first, so a
+# python-service/.env can still override it. Absent files are ignored.
+_SERVICE_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = _SERVICE_ROOT.parent
+ENV_FILES = (_REPO_ROOT / ".env", _SERVICE_ROOT / ".env")
 
 # Lists come from the environment as plain comma-separated strings
 # (``TRADING_SYMBOLS=BTC/USDT,ETH/USDT``), which is what .env.example documents and
@@ -36,7 +49,7 @@ LIVE_CONFIRMATION_PHRASE = "I_UNDERSTAND_REAL_MONEY_IS_AT_RISK"
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=ENV_FILES,
         env_file_encoding="utf-8",
         extra="ignore",
         case_sensitive=False,

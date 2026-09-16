@@ -235,3 +235,28 @@ def test_env_file_from_env_example_template_loads(monkeypatch, tmp_path):
     # ...and the template must still be disarmed.
     assert settings.effective_mode == "paper"
     assert not settings.live_trading_armed
+
+
+def test_env_file_is_found_regardless_of_working_directory(monkeypatch, tmp_path):
+    """Settings must not depend on where you happened to `cd` before starting.
+
+    Regression: ``env_file=".env"`` resolved against the working directory, so the
+    repo-root .env the README tells you to create was silently ignored when the
+    service was started from python-service/ -- and it starts from there. The
+    service came up on defaults with nothing reporting that it had.
+    """
+    from app.core.config import ENV_FILES
+
+    repo_root_env, service_root_env = ENV_FILES
+    assert repo_root_env.is_absolute() and service_root_env.is_absolute()
+    assert repo_root_env == ROOT / ".env"
+    assert service_root_env == ROOT / "python-service" / ".env"
+    # The service-local file is read last so it can override the repo-root one.
+    assert ENV_FILES.index(repo_root_env) < ENV_FILES.index(service_root_env)
+
+    # Changing directory must not change which files are consulted.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("SERVICE_API_KEY=should-be-ignored\n", encoding="utf-8")
+    monkeypatch.delenv("SERVICE_API_KEY", raising=False)
+
+    assert Settings().service_api_key != "should-be-ignored"
