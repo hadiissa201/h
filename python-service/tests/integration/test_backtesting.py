@@ -200,7 +200,14 @@ def test_a_backtest_on_a_prefix_matches_the_head_of_the_full_run(services, marke
 
 def test_entries_fill_on_the_bar_after_the_signal(services, market_data):
     """A signal computed on a bar's close cannot fill at that same close."""
-    candles = market_data.provider.generate("BTC/USDT", "1h", 2000)
+    # Must be the SAME window the backtest ran on. Synthetic backtests are
+    # anchored so they reproduce; asking the provider for "the latest 2000 bars"
+    # would hand this test a different stretch of history entirely.
+    from app.data.providers.synthetic import BACKTEST_WINDOW_END
+
+    candles = market_data.provider.generate(
+        "BTC/USDT", "1h", 2000, end=BACKTEST_WINDOW_END
+    )
     result = run_backtest(
         BacktestRequest(data=spec(limit=2000), starting_balance=Decimal("10000")),
         services,

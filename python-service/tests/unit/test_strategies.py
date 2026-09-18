@@ -64,12 +64,13 @@ def synthetic_run():
 
 
 # ------------------------------------------------------------------ catalogue
-def test_all_five_strategies_are_registered():
+def test_every_strategy_is_registered():
     assert set(STRATEGY_REGISTRY) == {
         "trend_following",
         "ema_momentum",
         "breakout",
         "mean_reversion",
+        "short_term_reversal",
         "volatility_breakout",
     }
 

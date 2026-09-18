@@ -116,8 +116,13 @@ def test_strategy_evaluate_returns_the_full_decision_context(client):
 
 def test_strategies_catalogue_is_served(client):
     strategies = client.get("/strategies").json()["strategies"]
-    assert len(strategies) == 5
+    # Counted against the registry rather than a literal: a hard-coded number
+    # here just fails every time a strategy is added, which teaches nothing.
+    from app.strategies.engine import STRATEGY_REGISTRY
+
+    assert len(strategies) == len(STRATEGY_REGISTRY)
     assert all(entry["allowed_regimes"] for entry in strategies)
+    assert all(entry["description"] for entry in strategies)
 
 
 def test_regime_endpoint_lists_the_strategies_it_permits(client):

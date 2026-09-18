@@ -55,6 +55,16 @@ BASE_SECONDS = 300
 # 400 days of 5m bars — enough for 1500 4h bars, cheap to generate vectorised.
 BASE_BARS = 115_200
 
+# Fixed window end for reproducible backtests.
+#
+# ``generate()`` defaults to the most recent bars, which is right for the live
+# path and wrong for a backtest: the same request returns a different window
+# depending on what time you ran it, so two runs minutes apart can disagree and
+# results cannot be compared across days at all. Backtests therefore anchor here.
+# Any fixed point inside the generated range works; this one is arbitrary and
+# must stay put, because moving it changes every synthetic backtest ever run.
+BACKTEST_WINDOW_END = pd.Timestamp("2025-06-23", tz="UTC")
+
 # Fixed grid origin. Every bar's identity is its offset from here, so the value
 # at a timestamp never depends on when it was generated. Changing this constant
 # regenerates every synthetic series, so don't.
@@ -140,12 +150,25 @@ class SyntheticMarketDataProvider(MarketDataProvider):
         ``end`` only trims the window; it does not reshape the path, so a shorter
         request is always a suffix of a longer one.
         """
-        frame = self._resampled(symbol, timeframe)
+        end_index: int | None = None
         if end is not None:
             end_ts = pd.Timestamp(end)
             if end_ts.tzinfo is None:
                 end_ts = end_ts.tz_localize("UTC")
-            frame = frame.loc[frame.index <= end_ts]
+            # Generate the window that ENDS there rather than slicing the recent
+            # frame. Slicing only worked while `end` happened to fall inside the
+            # last `base_bars`; an older anchor silently produced an empty frame.
+            # Absolute indexing means any window is directly reachable.
+            #
+            # Extend to the LAST base bar of that period, not its first. `end`
+            # names a bar by its opening timestamp, so stopping there would leave
+            # the final bucket holding a single 5m bar and report a partial
+            # candle as a complete one -- an hour's high and low collapsed to its
+            # first five minutes.
+            seconds = timeframe_to_seconds(timeframe)
+            last_base_bar = end_ts + pd.Timedelta(seconds=seconds - BASE_SECONDS)
+            end_index = _absolute_index(last_base_bar)
+        frame = self._resampled(symbol, timeframe, end_index=end_index)
         return frame.tail(bars).copy()
 
     def current_price(self, symbol: str) -> float:
@@ -206,14 +229,16 @@ class SyntheticMarketDataProvider(MarketDataProvider):
         )
 
     # --------------------------------------------------------------- internals
-    def _resampled(self, symbol: str, timeframe: str) -> pd.DataFrame:
+    def _resampled(
+        self, symbol: str, timeframe: str, end_index: int | None = None
+    ) -> pd.DataFrame:
         seconds = timeframe_to_seconds(timeframe)
         if seconds % BASE_SECONDS != 0:
             raise ValueError(
                 f"synthetic provider supports multiples of {BASE_TIMEFRAME}; "
                 f"got {timeframe!r}"
             )
-        base = self._base_frame(symbol)
+        base = self._base_frame(symbol, end_index=end_index)
         if seconds == BASE_SECONDS:
             return base
         resampled = (
@@ -223,14 +248,15 @@ class SyntheticMarketDataProvider(MarketDataProvider):
         )
         return resampled
 
-    def _base_frame(self, symbol: str) -> pd.DataFrame:
-        """The 5m path ending at the newest *started* bar.
+    def _base_frame(self, symbol: str, end_index: int | None = None) -> pd.DataFrame:
+        """The 5m path ending at the newest *started* bar, or at ``end_index``.
 
         Keyed on that bar, so the feed advances with the clock. Regenerating is
         safe precisely because the path is absolute: the bars a previous call
         returned come back bit-identical, and only new ones are added.
         """
-        end_index = _absolute_index(floor_to_timeframe(utcnow(), BASE_TIMEFRAME))
+        if end_index is None:
+            end_index = _absolute_index(floor_to_timeframe(utcnow(), BASE_TIMEFRAME))
         key = (symbol.upper(), end_index)
         cached = self._base_cache.get(key)
         if cached is None:

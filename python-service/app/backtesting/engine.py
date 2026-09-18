@@ -36,7 +36,11 @@ import pandas as pd
 
 from app.analytics.metrics import EquityPointLite, TradeSummary, compute_metrics
 from app.core.numeric import ZERO, round_money, safe_div, to_decimal
-from app.execution.fill_model import CostModel, simulate_market_fill
+from app.execution.fill_model import (
+    CostModel,
+    simulate_limit_fill,
+    simulate_market_fill,
+)
 from app.features import FeatureConfig, FeatureEngine
 from app.models.backtest import (
     BacktestTrade,
@@ -46,6 +50,7 @@ from app.models.backtest import (
 from app.models.enums import (
     BotStatus,
     ExitReason,
+    OrderType,
     PositionSide,
     Side,
     SignalDirection,
@@ -109,6 +114,19 @@ class BacktestOutput:
     period_end: datetime | None
     halted: bool = False
     halt_reason: str | None = None
+
+
+def limit_entry_fills(bar_low: Decimal, limit_price: Decimal) -> bool:
+    """Whether a resting buy limit is filled by a bar with this low.
+
+    Requires the bar to trade STRICTLY through the limit. A bar whose low merely
+    equals the limit is not a fill: at that price you are at the back of the
+    queue behind every order that was already resting, and only some of that
+    queue trades. Treating a touch as a fill is a small assumption that
+    systematically credits a mean-reversion strategy with the entries it would
+    most often have missed -- precisely the ones where price turned immediately.
+    """
+    return bar_low < limit_price
 
 
 class BacktestEngine:
@@ -182,11 +200,42 @@ class BacktestEngine:
                     cash + (position.quantity * bar_open if position else ZERO), 8
                 )
 
-            # --- 1. fill any entry decided on the previous bar, at this open
+            # --- 1. fill any entry decided on the previous bar
+            #
+            # MARKET fills at this bar's open. LIMIT rests at the signal's price
+            # and fills ONLY if the bar trades strictly through it -- a touch is
+            # not a fill, because at the touch price you are at the back of the
+            # queue. Unfilled orders expire after `entry_valid_bars` and are
+            # counted, so the saving on maker fees is never free: you forgo the
+            # trades that ran away from you, which are disproportionately the
+            # winners. That adverse selection is the real price of resting, and
+            # modelling it is the difference between this being a genuine
+            # improvement and a backtest artefact.
+            fill = None
             if pending is not None and position is None and not halted:
-                fill = simulate_market_fill(
-                    bar_open, pending["quantity"], Side.BUY, self.config.cost_model
-                )
+                if pending.get("order_type") == OrderType.LIMIT:
+                    limit_price = pending["limit_price"]
+                    if limit_entry_fills(bar_low, limit_price):
+                        fill = simulate_limit_fill(
+                            limit_price,
+                            pending["quantity"],
+                            Side.BUY,
+                            self.config.cost_model,
+                        )
+                    else:
+                        pending["bars_waited"] = pending.get("bars_waited", 0) + 1
+                        if pending["bars_waited"] >= pending.get("valid_bars", 1):
+                            rejections["LIMIT_ENTRY_NOT_FILLED"] = (
+                                rejections.get("LIMIT_ENTRY_NOT_FILLED", 0) + 1
+                            )
+                            pending = None
+                        # Still waiting: leave `pending` in place for the next bar.
+                else:
+                    fill = simulate_market_fill(
+                        bar_open, pending["quantity"], Side.BUY, self.config.cost_model
+                    )
+
+            if fill is not None and pending is not None:
                 cost = fill.notional + fill.fee
                 if cost <= cash:
                     cash = round_money(cash - cost, 8)
@@ -368,6 +417,12 @@ class BacktestEngine:
                                 "quantity": verdict.sizing.quantity,
                                 "stop_loss": candidate.stop_loss,
                                 "take_profit": candidate.take_profit,
+                                "order_type": (
+                                    primary.entry_order_type if primary else OrderType.MARKET
+                                ),
+                                "limit_price": candidate.entry,
+                                "valid_bars": primary.entry_valid_bars if primary else 1,
+                                "bars_waited": 0,
                                 "strategy": ",".join(candidate.aligned_strategies),
                                 "regime": str(candidate.regime.regime),
                                 "trailing_stop_atr_multiple": primary.trailing_stop_atr_multiple

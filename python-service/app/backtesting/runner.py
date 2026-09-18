@@ -55,12 +55,21 @@ def load_candles(spec: BacktestDataSpec, market_data) -> tuple[pd.DataFrame, str
         return validate_ohlcv_frame(frame), f"csv:{path.name}"
 
     if spec.source == "synthetic":
-        from app.data.providers.synthetic import SyntheticMarketDataProvider
+        from app.data.providers.synthetic import (
+            BACKTEST_WINDOW_END,
+            SyntheticMarketDataProvider,
+        )
 
         provider = SyntheticMarketDataProvider(
             seed=spec.synthetic_seed if spec.synthetic_seed is not None else 7
         )
-        frame = provider.generate(spec.symbol, spec.timeframe, spec.limit)
+        # Anchored, not "the last N bars": an unanchored window slides with the
+        # clock, so the same backtest returns different candles depending on when
+        # it ran. Two runs a few minutes apart could disagree, which makes a
+        # determinism check flaky and cross-day comparison meaningless.
+        frame = provider.generate(
+            spec.symbol, spec.timeframe, spec.limit, end=BACKTEST_WINDOW_END
+        )
         return validate_ohlcv_frame(frame), "synthetic"
 
     frame = market_data.get_candles(

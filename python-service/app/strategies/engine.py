@@ -27,6 +27,7 @@ from app.strategies.base import Strategy, StrategyContext
 from app.strategies.breakout import BreakoutStrategy
 from app.strategies.ema_momentum import EmaMomentumStrategy
 from app.strategies.mean_reversion import MeanReversionStrategy
+from app.strategies.short_term_reversal import ShortTermReversalStrategy
 from app.strategies.trend_following import TrendFollowingStrategy
 from app.strategies.volatility_breakout import VolatilityBreakoutStrategy
 
@@ -37,6 +38,7 @@ STRATEGY_REGISTRY: dict[str, type[Strategy]] = {
     EmaMomentumStrategy.name: EmaMomentumStrategy,
     BreakoutStrategy.name: BreakoutStrategy,
     MeanReversionStrategy.name: MeanReversionStrategy,
+    ShortTermReversalStrategy.name: ShortTermReversalStrategy,
     VolatilityBreakoutStrategy.name: VolatilityBreakoutStrategy,
 }
 

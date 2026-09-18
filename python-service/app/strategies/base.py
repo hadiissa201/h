@@ -23,7 +23,7 @@ import pandas as pd
 from pydantic import BaseModel
 
 from app.core.numeric import to_decimal
-from app.models.enums import MarketRegime, SignalDirection
+from app.models.enums import MarketRegime, OrderType, SignalDirection
 from app.models.signals import RegimeAssessment, StrategySignal
 
 
@@ -141,6 +141,8 @@ class Strategy(abc.ABC):
         partial_exit_at_r: float | None = None,
         partial_exit_fraction: float | None = None,
         time_stop_bars: int | None = None,
+        entry_order_type: OrderType = OrderType.MARKET,
+        entry_valid_bars: int = 1,
         features_used: tuple[str, ...] = (),
         metadata: dict[str, Any] | None = None,
     ) -> StrategySignal:
@@ -162,6 +164,8 @@ class Strategy(abc.ABC):
             partial_exit_at_r=partial_exit_at_r,
             partial_exit_fraction=partial_exit_fraction,
             time_stop_bars=time_stop_bars,
+            entry_order_type=entry_order_type,
+            entry_valid_bars=entry_valid_bars,
             features_used={name: context.row.get(name) for name in features_used},
             metadata=metadata or {},
         )

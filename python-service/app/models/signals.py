@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.models.enums import (
     MarketRegime,
+    OrderType,
     SignalDirection,
     TrendState,
     VolatilityState,
@@ -74,6 +75,16 @@ class StrategySignal(BaseModel):
     partial_exit_at_r: float | None = None
     partial_exit_fraction: float | None = Field(default=None, ge=0.0, le=1.0)
     time_stop_bars: int | None = None
+    # How the entry should be placed. MARKET crosses the spread and pays taker
+    # fees; LIMIT rests at ``entry`` and pays maker fees with no slippage, which
+    # roughly halves the cost hurdle -- but only fills if price comes to you.
+    # That trade-off is real and is modelled, not assumed away: see
+    # ``entry_valid_bars``.
+    entry_order_type: OrderType = OrderType.MARKET
+    # How long a resting entry stays live before it is cancelled. Chasing a
+    # missed entry for ever is how a limit strategy quietly becomes a market one
+    # at a much worse price.
+    entry_valid_bars: int = Field(default=1, ge=1, le=20)
     features_used: dict[str, float | None] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
