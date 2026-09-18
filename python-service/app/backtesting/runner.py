@@ -12,6 +12,7 @@ from typing import Any
 
 import pandas as pd
 
+from app.backtesting.benchmark import buy_and_hold
 from app.backtesting.engine import BacktestConfig, BacktestEngine, BacktestOutput
 from app.core.errors import ValidationError
 from app.core.events import EventType
@@ -182,6 +183,7 @@ def run_backtest(
         rejected_signals=output.rejected_signals,
         risk_rejections=output.risk_rejections,
         warnings=warnings,
+        benchmark=buy_and_hold(frame, request.starting_balance, config.cost_model),
     )
 
     if request.persist:

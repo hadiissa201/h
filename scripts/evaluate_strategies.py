@@ -152,6 +152,7 @@ def main() -> int:
             continue
 
         metrics = result.get("metrics", {})
+        benchmark = result.get("benchmark") or {}
         delivered = result.get("bars") or 0
         if delivered < args.limit * 0.9:
             print(
@@ -169,6 +170,8 @@ def main() -> int:
                 "profit_factor": metrics.get("profit_factor"),
                 "net_pnl": metrics.get("net_pnl"),
                 "max_dd": metrics.get("max_drawdown_pct"),
+                "hold_pct": benchmark.get("return_pct"),
+                "hold_dd": benchmark.get("max_drawdown_pct"),
             }
         )
         if hurdle is None:
@@ -180,20 +183,38 @@ def main() -> int:
             )
 
     # ------------------------------------------------------------------- table
-    print(f"\n{'symbol':<12}{'bars':>7}{'trades':>8}{'win%':>8}{'exp_R':>9}"
-          f"{'PF':>8}{'net P&L':>11}{'maxDD%':>9}")
-    print("-" * 72)
+    print(f"\n{'symbol':<12}{'trades':>8}{'win%':>7}{'exp_R':>9}{'PF':>7}"
+          f"{'strat%':>9}{'maxDD%':>8}  |{'HOLD%':>9}{'maxDD%':>8}{'verdict':>10}")
+    print("-" * 88)
     for row in rows:
         if "error" in row:
             print(f"{row['symbol']:<12}  ERROR: {row['error']}")
             continue
         win = row["win_rate"]
-        print(
-            f"{row['symbol']:<12}{row['bars'] or 0:>7}{row['trades'] or 0:>8}"
-            f"{(fmt(win * 100, '.1f') if win is not None else 'n/a'):>8}"
-            f"{fmt(row['expectancy_r']):>9}{fmt(row['profit_factor'], '.2f'):>8}"
-            f"{fmt(row['net_pnl'], '+.2f'):>11}{fmt(row['max_dd'] and float(row['max_dd']) * 100, '.2f'):>9}"
+        strategy_pct = (
+            float(row["net_pnl"]) / 10_000.0 * 100.0 if row["net_pnl"] is not None else None
         )
+        hold_pct = float(row["hold_pct"]) * 100.0 if row.get("hold_pct") is not None else None
+        if strategy_pct is None or hold_pct is None:
+            verdict = "n/a"
+        elif strategy_pct > hold_pct:
+            verdict = "BEATS"
+            row["beats_hold"] = True
+        else:
+            verdict = "loses to"
+        print(
+            f"{row['symbol']:<12}{row['trades'] or 0:>8}"
+            f"{(fmt(win * 100, '.1f') if win is not None else 'n/a'):>7}"
+            f"{fmt(row['expectancy_r']):>9}{fmt(row['profit_factor'], '.2f'):>7}"
+            f"{fmt(strategy_pct, '+.2f'):>9}"
+            f"{fmt(row['max_dd'] and float(row['max_dd']) * 100, '.2f'):>8}  |"
+            f"{fmt(hold_pct, '+.2f'):>9}"
+            f"{fmt(row.get('hold_dd') and float(row['hold_dd']) * 100, '.2f'):>8}"
+            f"{verdict:>10}"
+        )
+    print("\nHOLD = buying at the start of the window and doing nothing, same costs.")
+    print("A strategy that loses to HOLD took risk and paid fees to finish behind"
+          " sitting still.")
 
     # ------------------------------------------------------------------ verdict
     print()
@@ -208,6 +229,11 @@ def main() -> int:
     if not scored:
         print("  No symbol produced a usable result. Fix the errors above first.")
     else:
+        beat_hold = [r for r in rows if r.get("beats_hold")]
+        if not beat_hold:
+            print("  NOT ONE symbol beat buy-and-hold. Whatever else is true, trading")
+            print("  this actively destroyed value against doing nothing at all.")
+
         beat = [r for r in scored if hurdle is not None and float(r["expectancy_r"]) > hurdle]
         if not beat:
             print("  NO symbol clears its own costs. On this evidence the strategies")

@@ -129,6 +129,26 @@ class BacktestResult(BaseModel):
     rejected_signals: int = 0
     risk_rejections: dict[str, int] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
+    benchmark: BuyAndHoldBenchmark | None = None
+
+
+class BuyAndHoldBenchmark(BaseModel):
+    """What doing nothing would have returned over the identical window.
+
+    The bar every strategy has to clear. A strategy that makes 8% while the asset
+    made 40% has not made money in any sense that matters -- it has taken risk,
+    paid fees and underperformed sitting still. Reporting P&L without this is how
+    a losing idea keeps looking reasonable.
+
+    Costs are charged on both legs, so the comparison is like for like rather
+    than a frictionless ideal.
+    """
+
+    start_price: Decimal
+    end_price: Decimal
+    return_pct: Decimal
+    net_pnl: Decimal
+    max_drawdown_pct: Decimal
 
 
 class WalkForwardRequest(BaseModel):
