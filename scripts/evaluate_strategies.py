@@ -184,8 +184,8 @@ def main() -> int:
 
     # ------------------------------------------------------------------- table
     print(f"\n{'symbol':<12}{'trades':>8}{'win%':>7}{'exp_R':>9}{'PF':>7}"
-          f"{'strat%':>9}{'maxDD%':>8}  |{'HOLD%':>9}{'maxDD%':>8}{'verdict':>10}")
-    print("-" * 88)
+          f"{'strat%':>9}{'maxDD%':>8}  |{'HOLD%':>9}{'CASH%':>7}{'verdict':>15}")
+    print("-" * 90)
     for row in rows:
         if "error" in row:
             print(f"{row['symbol']:<12}  ERROR: {row['error']}")
@@ -195,13 +195,21 @@ def main() -> int:
             float(row["net_pnl"]) / 10_000.0 * 100.0 if row["net_pnl"] is not None else None
         )
         hold_pct = float(row["hold_pct"]) * 100.0 if row.get("hold_pct") is not None else None
-        if strategy_pct is None or hold_pct is None:
+        # Cash is the real floor. Beating buy-and-hold in a falling market proves
+        # nothing -- a strategy that sits out most of a bear market "beats" the
+        # asset without any edge at all. The only way to earn a positive verdict
+        # is to finish ahead of having done nothing whatsoever with the money.
+        if strategy_pct is None:
             verdict = "n/a"
-        elif strategy_pct > hold_pct:
-            verdict = "BEATS"
-            row["beats_hold"] = True
+        elif strategy_pct > 0:
+            verdict = "BEATS CASH"
+            row["beats_cash"] = True
+            if hold_pct is not None and strategy_pct > hold_pct:
+                row["beats_hold"] = True
         else:
-            verdict = "loses to"
+            verdict = "loses to cash"
+            if hold_pct is not None and strategy_pct > hold_pct:
+                row["beats_hold"] = True
         print(
             f"{row['symbol']:<12}{row['trades'] or 0:>8}"
             f"{(fmt(win * 100, '.1f') if win is not None else 'n/a'):>7}"
@@ -209,12 +217,12 @@ def main() -> int:
             f"{fmt(strategy_pct, '+.2f'):>9}"
             f"{fmt(row['max_dd'] and float(row['max_dd']) * 100, '.2f'):>8}  |"
             f"{fmt(hold_pct, '+.2f'):>9}"
-            f"{fmt(row.get('hold_dd') and float(row['hold_dd']) * 100, '.2f'):>8}"
-            f"{verdict:>10}"
+            f"{'+0.00':>7}"
+            f"{verdict:>15}"
         )
-    print("\nHOLD = buying at the start of the window and doing nothing, same costs.")
-    print("A strategy that loses to HOLD took risk and paid fees to finish behind"
-          " sitting still.")
+    print("\nHOLD = buying at the start and doing nothing.  CASH = not trading at all.")
+    print("Beating HOLD in a falling market is not skill: anything that sits in cash")
+    print("most of the time does that. CASH is the bar that has to be cleared.")
 
     # ------------------------------------------------------------------ verdict
     print()
@@ -229,10 +237,15 @@ def main() -> int:
     if not scored:
         print("  No symbol produced a usable result. Fix the errors above first.")
     else:
+        beat_cash = [r for r in rows if r.get("beats_cash")]
         beat_hold = [r for r in rows if r.get("beats_hold")]
-        if not beat_hold:
-            print("  NOT ONE symbol beat buy-and-hold. Whatever else is true, trading")
-            print("  this actively destroyed value against doing nothing at all.")
+        if not beat_cash:
+            print("  NOT ONE symbol finished ahead of cash. Every one of them lost money")
+            print("  that would still be there if the account had never traded.")
+            if beat_hold:
+                names = ", ".join(r["symbol"] for r in beat_hold)
+                print(f"  ({names} did lose less than buy-and-hold -- but in a falling")
+                print("   market that is non-participation, not edge.)")
 
         beat = [r for r in scored if hurdle is not None and float(r["expectancy_r"]) > hurdle]
         if not beat:

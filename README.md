@@ -4,11 +4,15 @@ An autonomous, risk-managed crypto trading system. **n8n** orchestrates *when*
 things happen; a **Python service** does every calculation that money depends on.
 An LLM sits on top as a reviewer that can only ever say *no*.
 
-> **Read this first.** The system runs in **paper mode** and cannot place a real
-> order until three independent switches are set *and* credentials exist. Nothing
-> in this repository is evidence that the strategies are profitable — no live
-> results exist, and the backtests included run on synthetic data. Treat it as an
-> engineering platform for research, not as a money printer. See
+> **Read this first.** The bundled strategies were tested on 20 months of real
+> Binance history and **lost money** — 1,065 out-of-sample trades, negative
+> expectancy on every symbol, no edge at any stage. The measurements are in
+> [docs/FINDINGS.md](docs/FINDINGS.md). Do not fund this expecting a return.
+>
+> The system runs in **paper mode** and cannot place a real order until three
+> independent switches are set *and* credentials exist. Treat it as an
+> engineering platform for evaluating trading ideas honestly — which is what it
+> is good at — not as a money printer. See
 > [Honest limitations](#honest-limitations).
 
 ---
@@ -287,6 +291,7 @@ Stated plainly, because a trading system that oversells itself is dangerous.
 
 | Document | What is in it |
 |---|---|
+| [docs/FINDINGS.md](docs/FINDINGS.md) | **Measured results: these strategies have no edge. Read this first.** |
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | How the layers fit together and why |
 | [docs/API.md](docs/API.md) | Every endpoint, with request and response shapes |
 | [docs/RUNBOOK.md](docs/RUNBOOK.md) | Daily operation, diagnosis, incident response |
