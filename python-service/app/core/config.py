@@ -105,6 +105,15 @@ class Settings(BaseSettings):
     paper_spread_bps: Decimal = Field(default=Decimal("4"))
     paper_partial_fill_probability: float = Field(default=0.0)
 
+    # ---------------------------------------------------------- benchmarks
+    # The yield idle capital gives up to be traded. Cash at 0% is the wrong
+    # floor: USDT lends on every major venue, so a strategy returning less than
+    # this has lost money in the only sense that matters. Deliberately
+    # conservative -- a LOW bar is the generous reading for the strategies, so
+    # failing to clear it is decisive. Not risk-free: CeFi lending carries
+    # counterparty risk and stablecoins carry depeg risk.
+    benchmark_yield_apy: Decimal = Field(default=Decimal("0.04"))
+
     # --------------------------------------------------------------- risk
     risk_per_trade: Decimal = Field(default=Decimal("0.005"))
     max_position_pct_equity: Decimal = Field(default=Decimal("0.20"))

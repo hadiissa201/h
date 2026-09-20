@@ -130,6 +130,7 @@ class BacktestResult(BaseModel):
     risk_rejections: dict[str, int] = Field(default_factory=dict)
     warnings: list[str] = Field(default_factory=list)
     benchmark: BuyAndHoldBenchmark | None = None
+    yield_baseline: YieldBaseline | None = None
 
 
 class BuyAndHoldBenchmark(BaseModel):
@@ -149,6 +150,26 @@ class BuyAndHoldBenchmark(BaseModel):
     return_pct: Decimal
     net_pnl: Decimal
     max_drawdown_pct: Decimal
+
+
+class YieldBaseline(BaseModel):
+    """What the same money would have earned just sitting in a yield account.
+
+    Cash at 0% is the wrong floor. Idle USDT can be lent on any major venue, so
+    the money a strategy ties up has a real opportunity cost. A strategy that
+    returns +2% a year is not "profitable" when lending pays 4% for no work,
+    no screen time and no execution risk -- it is a loss dressed as a gain.
+
+    This is deliberately NOT called risk-free. CeFi lending carries counterparty
+    risk, stablecoins carry depeg risk, and the rate floats. It is a benchmark,
+    not a guarantee; `annual_rate` records the assumption so a result can never
+    be read without knowing which rate produced it.
+    """
+
+    annual_rate: Decimal
+    days: Decimal
+    return_pct: Decimal
+    net_pnl: Decimal
 
 
 class WalkForwardRequest(BaseModel):

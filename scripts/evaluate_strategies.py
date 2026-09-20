@@ -79,6 +79,33 @@ def cost_hurdle_r(config: dict[str, Any], risk_per_trade: float, position_pct: f
     return round_trip * position_pct / risk_per_trade
 
 
+def yield_return_pct(row: dict[str, Any], override_apy: float | None) -> float | None:
+    """Percent the capital would have earned lent out over this exact window.
+
+    The service already computes this at its configured rate. An override
+    recomputes from the same elapsed days, so "what if lending paid 6%?" costs
+    nothing and the window stays honest -- the days come from the backtest,
+    never from an assumption.
+    """
+    if override_apy is None:
+        pct = row.get("yield_pct")
+        return float(pct) * 100.0 if pct is not None else None
+    days = row.get("yield_days")
+    if days is None:
+        return None
+    return ((1.0 + override_apy) ** (float(days) / 365.0) - 1.0) * 100.0
+
+
+def effective_rate(rows: list[dict[str, Any]], override_apy: float | None) -> float | None:
+    """The APY actually used, for printing. Override wins; else the service's."""
+    if override_apy is not None:
+        return override_apy
+    for row in rows:
+        if row.get("yield_rate") is not None:
+            return float(row["yield_rate"])
+    return None
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", default="http://localhost:8000")
@@ -87,6 +114,14 @@ def main() -> int:
     parser.add_argument("--timeframe", default="1h")
     parser.add_argument("--limit", type=int, default=5000, help="bars of history")
     parser.add_argument("--skip-walkforward", action="store_true")
+    parser.add_argument(
+        "--lending-apy",
+        type=float,
+        default=None,
+        help="annual yield idle capital could earn instead (default: the "
+             "service's BENCHMARK_YIELD_APY). This is the bar that matters -- "
+             "cash at 0%% flatters every strategy.",
+    )
     parser.add_argument(
         "--allow-synthetic",
         action="store_true",
@@ -172,6 +207,9 @@ def main() -> int:
                 "max_dd": metrics.get("max_drawdown_pct"),
                 "hold_pct": benchmark.get("return_pct"),
                 "hold_dd": benchmark.get("max_drawdown_pct"),
+                "yield_pct": (result.get("yield_baseline") or {}).get("return_pct"),
+                "yield_rate": (result.get("yield_baseline") or {}).get("annual_rate"),
+                "yield_days": (result.get("yield_baseline") or {}).get("days"),
             }
         )
         if hurdle is None:
@@ -184,8 +222,8 @@ def main() -> int:
 
     # ------------------------------------------------------------------- table
     print(f"\n{'symbol':<12}{'trades':>8}{'win%':>7}{'exp_R':>9}{'PF':>7}"
-          f"{'strat%':>9}{'maxDD%':>8}  |{'HOLD%':>9}{'CASH%':>7}{'verdict':>15}")
-    print("-" * 90)
+          f"{'strat%':>9}{'maxDD%':>8}  |{'HOLD%':>9}{'YIELD%':>8}{'verdict':>16}")
+    print("-" * 92)
     for row in rows:
         if "error" in row:
             print(f"{row['symbol']:<12}  ERROR: {row['error']}")
@@ -195,21 +233,26 @@ def main() -> int:
             float(row["net_pnl"]) / 10_000.0 * 100.0 if row["net_pnl"] is not None else None
         )
         hold_pct = float(row["hold_pct"]) * 100.0 if row.get("hold_pct") is not None else None
-        # Cash is the real floor. Beating buy-and-hold in a falling market proves
-        # nothing -- a strategy that sits out most of a bear market "beats" the
-        # asset without any edge at all. The only way to earn a positive verdict
-        # is to finish ahead of having done nothing whatsoever with the money.
+        yield_pct = yield_return_pct(row, args.lending_apy)
+        # The floor is not zero. Idle USDT lends on any major venue, so money
+        # tied up in a strategy is giving up a real yield. Beating buy-and-hold
+        # in a falling market proves nothing -- anything that sits in cash does
+        # that. The only verdict worth earning is finishing ahead of the yield
+        # the capital surrendered to be traded.
         if strategy_pct is None:
             verdict = "n/a"
-        elif strategy_pct > 0:
-            verdict = "BEATS CASH"
-            row["beats_cash"] = True
-            if hold_pct is not None and strategy_pct > hold_pct:
-                row["beats_hold"] = True
         else:
-            verdict = "loses to cash"
             if hold_pct is not None and strategy_pct > hold_pct:
                 row["beats_hold"] = True
+            if strategy_pct > 0:
+                row["beats_cash"] = True
+            if yield_pct is not None and strategy_pct > yield_pct:
+                row["beats_yield"] = True
+                verdict = "BEATS YIELD"
+            elif strategy_pct > 0:
+                verdict = "loses to yield"
+            else:
+                verdict = "loses money"
         print(
             f"{row['symbol']:<12}{row['trades'] or 0:>8}"
             f"{(fmt(win * 100, '.1f') if win is not None else 'n/a'):>7}"
@@ -217,12 +260,20 @@ def main() -> int:
             f"{fmt(strategy_pct, '+.2f'):>9}"
             f"{fmt(row['max_dd'] and float(row['max_dd']) * 100, '.2f'):>8}  |"
             f"{fmt(hold_pct, '+.2f'):>9}"
-            f"{'+0.00':>7}"
-            f"{verdict:>15}"
+            f"{fmt(yield_pct, '+.2f'):>8}"
+            f"{verdict:>16}"
         )
-    print("\nHOLD = buying at the start and doing nothing.  CASH = not trading at all.")
+
+    rate = effective_rate(rows, args.lending_apy)
+    print("\nHOLD  = buying at the start and doing nothing.")
+    if rate is not None:
+        print(f"YIELD = the same money lent at {rate * 100:.2f}% APY over the same window.")
+    else:
+        print("YIELD = the same money lent out over the same window.")
     print("Beating HOLD in a falling market is not skill: anything that sits in cash")
-    print("most of the time does that. CASH is the bar that has to be cleared.")
+    print("most of the time does that. YIELD is the bar that has to be cleared --")
+    print("a strategy that earns less than lending has lost money for the risk taken.")
+    print("(Lending is not risk-free: counterparty and stablecoin depeg risk are real.)")
 
     # ------------------------------------------------------------------ verdict
     print()
@@ -239,6 +290,7 @@ def main() -> int:
     else:
         beat_cash = [r for r in rows if r.get("beats_cash")]
         beat_hold = [r for r in rows if r.get("beats_hold")]
+        beat_yield = [r for r in rows if r.get("beats_yield")]
         if not beat_cash:
             print("  NOT ONE symbol finished ahead of cash. Every one of them lost money")
             print("  that would still be there if the account had never traded.")
@@ -246,6 +298,11 @@ def main() -> int:
                 names = ", ".join(r["symbol"] for r in beat_hold)
                 print(f"  ({names} did lose less than buy-and-hold -- but in a falling")
                 print("   market that is non-participation, not edge.)")
+        elif not beat_yield:
+            names = ", ".join(r["symbol"] for r in beat_cash)
+            print(f"  {names} finished positive, but NONE beat lending. Making +2% while")
+            print("  idle capital earns more is not profit -- it is paying for the")
+            print("  privilege of taking risk. Lending needs no uptime and no strategy.")
 
         beat = [r for r in scored if hurdle is not None and float(r["expectancy_r"]) > hurdle]
         if not beat:

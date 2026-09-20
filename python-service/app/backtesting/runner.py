@@ -12,7 +12,7 @@ from typing import Any
 
 import pandas as pd
 
-from app.backtesting.benchmark import buy_and_hold
+from app.backtesting.benchmark import buy_and_hold, yield_baseline
 from app.backtesting.engine import BacktestConfig, BacktestEngine, BacktestOutput
 from app.core.errors import ValidationError
 from app.core.events import EventType
@@ -193,6 +193,12 @@ def run_backtest(
         risk_rejections=output.risk_rejections,
         warnings=warnings,
         benchmark=buy_and_hold(frame, request.starting_balance, config.cost_model),
+        yield_baseline=yield_baseline(
+            request.starting_balance,
+            services.settings.benchmark_yield_apy,
+            output.period_start,
+            output.period_end,
+        ),
     )
 
     if request.persist:

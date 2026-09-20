@@ -7,12 +7,13 @@ strategy destroyed value by trading.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pandas as pd
 import pytest
 
-from app.backtesting.benchmark import buy_and_hold
+from app.backtesting.benchmark import buy_and_hold, yield_baseline
 from app.execution.fill_model import CostModel
 
 START = Decimal("10000")
@@ -86,3 +87,71 @@ def test_drawdown_reflects_the_ride_not_just_the_endpoints(costs):
 def test_too_little_data_returns_nothing_rather_than_a_fake_number(costs):
     assert buy_and_hold(frame([100.0]), START, costs) is None
     assert buy_and_hold(None, START, costs) is None
+
+
+# --------------------------------------------------------------- yield baseline
+# Cash at 0% is the wrong floor. These pin the bar that actually matters: the
+# yield the capital gave up to be traded.
+
+def test_one_year_at_four_percent_returns_about_four_percent():
+    result = yield_baseline(
+        START, Decimal("0.04"), datetime(2025, 1, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC)
+    )
+    assert result is not None
+    assert float(result.return_pct) == pytest.approx(0.04, abs=0.0005)
+    assert float(result.net_pnl) == pytest.approx(400.0, abs=5.0)
+
+
+def test_half_a_year_earns_less_than_half_a_year_of_simple_interest():
+    """Compounding is applied, so the fractional-year figure is not linear."""
+    half = yield_baseline(
+        START, Decimal("0.04"), datetime(2025, 1, 1, tzinfo=UTC), datetime(2025, 7, 2, tzinfo=UTC)
+    )
+    assert half is not None
+    # (1.04)^0.5 - 1 = 1.98%, slightly under the 2% a simple rate would pay.
+    assert float(half.return_pct) == pytest.approx(0.0198, abs=0.0005)
+    assert float(half.return_pct) < 0.02
+
+
+def test_the_rate_travels_with_the_result():
+    """A benchmark whose assumption is not recorded can be quoted dishonestly."""
+    result = yield_baseline(
+        START, Decimal("0.06"), datetime(2025, 1, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC)
+    )
+    assert result is not None
+    assert result.annual_rate == Decimal("0.06")
+    assert float(result.days) == pytest.approx(365.0, abs=0.01)
+
+
+def test_a_higher_rate_is_a_higher_bar():
+    window = (datetime(2025, 1, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC))
+    low = yield_baseline(START, Decimal("0.04"), *window)
+    high = yield_baseline(START, Decimal("0.06"), *window)
+    assert low is not None and high is not None
+    assert high.net_pnl > low.net_pnl
+
+
+def test_zero_rate_reproduces_the_old_cash_baseline():
+    """The previous CASH column is just this benchmark with the rate set to 0."""
+    result = yield_baseline(
+        START, Decimal("0"), datetime(2025, 1, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC)
+    )
+    assert result is not None
+    assert float(result.net_pnl) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_missing_or_inverted_window_yields_nothing_rather_than_a_wrong_number():
+    stamp = datetime(2025, 1, 1, tzinfo=UTC)
+    assert yield_baseline(START, Decimal("0.04"), None, stamp) is None
+    assert yield_baseline(START, Decimal("0.04"), stamp, None) is None
+    # Same instant: no time passed, so no yield was earned.
+    assert yield_baseline(START, Decimal("0.04"), stamp, stamp) is None
+    # End before start would otherwise produce a negative "yield".
+    assert yield_baseline(START, Decimal("0.04"), stamp, datetime(2024, 1, 1, tzinfo=UTC)) is None
+
+
+def test_a_negative_rate_is_refused():
+    """Lending does not charge you. A negative rate is a caller bug, not a bar."""
+    assert yield_baseline(
+        START, Decimal("-0.01"), datetime(2025, 1, 1, tzinfo=UTC), datetime(2026, 1, 1, tzinfo=UTC)
+    ) is None

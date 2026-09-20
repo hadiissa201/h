@@ -25,6 +25,8 @@ this project in six months, read this before rebuilding anything.
 - [The cost hurdle](#the-cost-hurdle)
 - [What was tested and rejected](#what-was-tested-and-rejected)
 - [What the result is not](#what-the-result-is-not)
+- [The one thing that did measure positive: funding carry](#the-one-thing-that-did-measure-positive-funding-carry)
+- [Independent replication: two outside repositories](#independent-replication-two-outside-repositories)
 - [What would have to be different](#what-would-have-to-be-different)
 - [Reproducing this](#reproducing-this)
 
@@ -225,11 +227,84 @@ trade however smooth the funding looks.
 SOL did not pay at all, which is worth noting: the effect depends on persistent
 long demand and is not a property of crypto in general.
 
+**Independently replicated, and independently killed.** An unrelated researcher
+(`EstebanSP23/crypto_systematic_research`) ran the same trade over a longer
+window — Jan 2022 to May 2026, 4.4 years against our 625 days — and measured
+**+3.13% APY** net. We measured **+3.00%**. They found 83.9% of funding events
+positive; we found 81.3%. Different code, different window, same answer, which
+is about as good as external validation gets.
+
+They killed it, for the reason stated above made concrete: **USDT lending pays
+~6%**, so carry earns roughly half of the no-effort alternative. Their threshold
+variants — only carry when funding is high — did *worse* (+1.13%, +0.87%,
++0.56%), because each entry and exit pays fees that the funding never recovers.
+
+Treat funding carry as dead at retail size. It is a real mechanism that does not
+pay enough to cover what it costs to run.
+
 Reproduce with:
 
 ```bash
 python scripts/funding_carry.py --days 625
 ```
+
+## Independent replication: two outside repositories
+
+Two third-party crypto research repositories were audited against this work.
+Neither was written by us, and both were found by someone else.
+
+### `Gotodataru/binance-futures-backtest`
+
+Methodologically sound: documented no-lookahead (`merge_asof` backward, entry on
+the next bar's open), walk-forward 6-month train / 2-month test, and an explicit
+execution model of 0.04% commission plus 0.01% slippage per side. Three
+strategies — funding mean reversion, taker-pressure momentum, OI/price
+divergence — across 10 symbols on 3 years of Binance data.
+
+Its own committed `metrics_per_symbol.csv` files:
+
+| Strategy | Symbols positive | Mean return |
+|---|---|---|
+| Funding MR | BTC only: **−0.23%**, Sharpe −1.01, PF 0.62 | — |
+| Taker momentum | **1 / 10** | −0.28% |
+| OI divergence | **3 / 10** | −0.22% |
+
+**17 of 21 symbol-runs negative.** The README headlines "XRPUSDT Sharpe +1.58"
+for the first strategy, but XRP is absent from that strategy's committed CSV and
+is the *worst* symbol in the other two (−3.59 and −1.81 Sharpe). Read the data
+files, not the README.
+
+The relevance: an independent author, with correct walk-forward and real fees,
+on different strategies, reached the same conclusion this repository did. That
+is evidence the harness is measuring the market rather than a bug in our code.
+
+### `EstebanSP23/crypto_systematic_research`
+
+Publishes a "kill list" of 8 rejected strategies with reasons — rare and good
+practice. Its funding-carry kill is discussed above. Its recurring kill reasons
+are worth internalising: curve-fitting to a favourable regime, fee drag on fast
+timeframes, and positive return masking an undeployable drawdown.
+
+Its one surviving, live-deployed strategy is where the discipline breaks. A
+grep of `01_quattro_donchian/backtest.py` for fees, slippage or commission
+returns **nothing**; P&L is `sum((price - entry_price) * size)`, raw price
+difference, on a *perpetual futures* strategy paying funding every 8 hours and
+held 3.2 days on average. Three of the repo's four scripts model costs. The one
+that does not is the one carrying the +1,107% headline chart.
+
+In fairness: the fee drag is roughly 0.03 R per unit round-trip against a
++13.4 R average winner, so costs alone probably would not kill it. The decisive
+problems are statistical — **94 trades, of which 11 produce most of the P&L**,
+an effective sample size near 11; 2% risk per unit compounding on a 12× growing
+account, so late trades are sized 12× early ones; no buy-and-hold benchmark
+computed anywhere for a long-only BTC strategy; and `MAX_LEVERAGE = 20`. Live
+since May 2026, with no live results published.
+
+### What both confirm
+
+Costed, walk-forward, honestly-benchmarked crypto strategy research keeps
+returning the same answer. Three independent sources now agree. The absence of
+an edge in this repository is not a defect in this repository.
 
 ## What would have to be different
 
@@ -265,7 +340,12 @@ python scripts/evaluate_strategies.py --api-key "$SERVICE_API_KEY" --limit 15000
 
 Takes a few minutes. The script refuses to run against synthetic data unless
 forced, computes the cost hurdle from the live configuration rather than a
-constant, reports buy-and-hold and cash baselines, flags any symbol with too few
-trades to be meaningful, and is written to be able to say there is no edge.
+constant, reports buy-and-hold and lending-yield baselines, flags any symbol with
+too few trades to be meaningful, and is written to be able to say there is no
+edge.
+
+`--lending-apy` overrides the benchmark rate (default `BENCHMARK_YIELD_APY`,
+0.04) without re-running the backtests, so `--lending-apy 0.06` re-scores every
+symbol against a 6% bar and `--lending-apy 0` reproduces the old cash floor.
 
 Exact figures will drift as the window moves. The conclusion should not.

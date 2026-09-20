@@ -12,13 +12,14 @@ to both legs. Not an argument for buy-and-hold -- just the bar to clear.
 
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 
 import pandas as pd
 
 from app.core.numeric import ZERO, round_money, safe_div, to_decimal
 from app.execution.fill_model import CostModel, simulate_market_fill
-from app.models.backtest import BuyAndHoldBenchmark
+from app.models.backtest import BuyAndHoldBenchmark, YieldBaseline
 from app.models.enums import Side
 
 
@@ -70,4 +71,44 @@ def buy_and_hold(
         return_pct=safe_div(net_pnl, starting_balance),
         net_pnl=net_pnl,
         max_drawdown_pct=round_money(max(ZERO, max_drawdown), 8),
+    )
+
+
+def yield_baseline(
+    starting_balance: Decimal,
+    annual_rate: Decimal,
+    period_start: datetime | None,
+    period_end: datetime | None,
+) -> YieldBaseline | None:
+    """What the same capital would have earned lent out over the same window.
+
+    Cash at 0% flatters every strategy. Idle USDT earns on any major venue, so
+    the correct floor is not "did it beat zero" but "did it beat the yield the
+    money was giving up to be traded". An independent researcher killed a
+    funding-carry strategy on exactly this test: +3.13% APY is a loss against a
+    ~6% lending rate, and it only looks like a win when the benchmark is zero.
+
+    Compounded daily rather than simple, because that is how the venues pay it.
+    A flat rate over the whole window is an approximation -- real rates float --
+    so `annual_rate` travels with the result and the caller states its source.
+    """
+    if period_start is None or period_end is None:
+        return None
+    if starting_balance <= ZERO or annual_rate < ZERO:
+        return None
+
+    elapsed_days = (period_end - period_start).total_seconds() / 86400.0
+    if elapsed_days <= 0:
+        return None
+
+    # (1 + r)^(days/365) - 1. Decimal has no fractional power, and the float
+    # round-trip is harmless here: this is a benchmark, not an accounting entry.
+    growth = (1.0 + float(annual_rate)) ** (elapsed_days / 365.0)
+    net_pnl = round_money(starting_balance * to_decimal(growth - 1.0), 8)
+
+    return YieldBaseline(
+        annual_rate=annual_rate,
+        days=round_money(to_decimal(elapsed_days), 4),
+        return_pct=safe_div(net_pnl, starting_balance),
+        net_pnl=net_pnl,
     )
