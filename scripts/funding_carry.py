@@ -47,6 +47,20 @@ PAGE_LIMIT = 1000
 # Deliberately on the pessimistic side.
 ROUND_TRIP_COST_BPS = 30.0
 
+# Short-leg leverage choices to report against.
+#
+# Funding accrues on NOTIONAL, but the trade consumes spot capital plus futures
+# margin, so return on the money actually tied up is always lower than the
+# headline. Reporting the notional figure alone overstates the trade, which is
+# the specific way carry gets oversold.
+#
+# The leverage choice is a straight trade between capital efficiency and
+# survival: 2x leaves roughly 50% of adverse room before liquidation, 10x
+# leaves ~10%. Bitcoin has moved 10% in a day more than once. Higher leverage
+# reads better in this table and is closer to losing the position outright --
+# and a liquidated short leaves you long spot into the rally that killed it.
+LEVERAGE_CHOICES = (2.0, 3.0, 5.0, 10.0)
+
 
 @dataclass(frozen=True)
 class FundingStats:
@@ -189,11 +203,32 @@ def main() -> int:
     print("gross/yr = annualised, before costs   net/yr = after a 30bps round trip")
     print("worst    = deepest run of paying instead of collecting")
 
-    print(f"\nOn {args.capital:,.0f} of notional, over the window:")
+    # ------------------------------------------------ return on deployed capital
+    print("\nRETURN ON DEPLOYED CAPITAL (what the money actually earns)")
+    print("Funding accrues on notional, but the trade ties up spot AND futures")
+    print("margin. Per 10,000 of notional:\n")
+    header = f"{'symbol':<10}{'on notional':>13}"
+    for leverage in LEVERAGE_CHOICES:
+        header += f"{f'{leverage:g}x short':>12}"
+    print(header)
+    print("-" * len(header))
     for stats in results:
+        line = f"{stats.symbol:<10}{stats.annualised_net * 100:>12.2f}%"
+        for leverage in LEVERAGE_CHOICES:
+            capital = 1.0 + 1.0 / leverage  # spot + margin, per unit of notional
+            line += f"{stats.annualised_net / capital * 100:>11.2f}%"
+        print(line)
+    print("\nHigher leverage on the short looks better here and is closer to being")
+    print("liquidated. At 10x a ~10% rally wipes the short leg and leaves you long")
+    print("spot into it. Bitcoin has moved 10% in a day more than once.")
+
+    print(f"\nCash on {args.capital:,.0f} of notional over the window:")
+    for stats in results:
+        at_3x = stats.annualised_net / (1.0 + 1.0 / 3.0)
         print(
             f"  {stats.symbol:<10} {args.capital * stats.total_rate:>10,.0f} "
-            f"collected  ({stats.annualised_net * 100:+.2f}% a year net)"
+            f"collected  ({stats.annualised_net * 100:+.2f}%/yr on notional, "
+            f"{at_3x * 100:+.2f}%/yr on capital at 3x)"
         )
 
     best = max(results, key=lambda s: s.annualised_net)
@@ -202,10 +237,17 @@ def main() -> int:
         print("  Funding did not pay a short over this window. The carry trade was")
         print("  not a trade. That is the answer.")
     else:
-        print(f"  Best was {best.symbol} at {best.annualised_net * 100:.2f}% a year net,")
-        print(f"  paid in {best.positive_share * 100:.0f}% of periods, with a worst")
-        print(f"  stretch of {best.worst_stretch * 100:.2f}%.")
-        print("\n  Before treating that as income, understand what it is NOT:")
+        on_capital = best.annualised_net / (1.0 + 1.0 / 3.0)
+        print(f"  Best was {best.symbol} at {best.annualised_net * 100:.2f}% a year net")
+        print(f"  on notional -- but {on_capital * 100:.2f}% on the capital actually")
+        print(f"  deployed at 3x. Paid in {best.positive_share * 100:.0f}% of periods,")
+        print(f"  worst stretch {best.worst_stretch * 100:.2f}%.")
+        print("\n  COMPARE THAT TO A SAVINGS ACCOUNT OR SHORT-DATED GOVERNMENT BONDS")
+        print("  before going further. If risk-free pays about the same, this trade")
+        print("  earns the same return while adding exchange counterparty risk,")
+        print("  liquidation risk and daily management. That is a worse trade, not a")
+        print("  better one, however consistent the funding looks.")
+        print("\n  Also understand what it is NOT:")
         print("  * it needs the short leg margined well enough to survive a rally,")
         print("    and liquidation there is how this trade actually kills people;")
         print("  * it is one venue, so it carries that venue's counterparty risk;")

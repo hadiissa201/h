@@ -4,6 +4,10 @@
 months of real Binance history, every strategy in this repository loses money.
 The result is consistent, statistically meaningful, and not close.
 
+One thing did measure positive — **funding carry**, at about 3% a year on
+deployed capital, which is probably not worth the risk it carries. See
+[the funding carry section](#the-one-thing-that-did-measure-positive-funding-carry).
+
 This document exists so the evidence outlives the memory of it. If you return to
 this project in six months, read this before rebuilding anything.
 
@@ -174,6 +178,58 @@ strategies, on *these* symbols, at *this* timeframe, do not.
 market, which is exactly when trend-following struggles most. A bull-market
 window might score differently — though the negative gross expectancy suggests
 not much.
+
+## The one thing that did measure positive: funding carry
+
+Tested separately, and it is not a strategy — it is arithmetic on Binance's
+published funding history. On perpetual futures, longs pay shorts a funding fee
+when positioning is lopsided. Hold spot and short the perp against it and the
+price moves cancel, leaving the funding.
+
+Same 625-day window, 1,875 funding periods per symbol:
+
+| Symbol | Periods paid | Total collected | Net/yr on notional | **Net/yr on capital (3x)** | Worst stretch |
+|---|---|---|---|---|---|
+| BTCUSDT | **81.3%** | +7.14% | +4.00% | **+3.00%** | −0.41% |
+| ETHUSDT | **77.4%** | +6.11% | +3.40% | **+2.55%** | −0.60% |
+| SOLUSDT | 56.4% | −0.64% | −0.55% | −0.41% | −2.62% |
+
+**This is real.** 81% of 1,875 periods paid, with a worst drawdown of 0.41%
+against 54–79% for holding the asset. That is a mechanism working, not luck, and
+it is the only positive result in this repository.
+
+**But read the capital column, not the headline.** Funding accrues on notional
+while the trade ties up spot capital *and* futures margin. Per $10,000 of
+notional at 3x on the short: $10,000 spot + $3,333 margin = $13,333 deployed to
+earn $400. That is **3.0%**, not 4%.
+
+Raising leverage improves that number and shortens the distance to ruin:
+
+| Short leverage | Return on capital | Rally that wipes the short leg |
+|---|---|---|
+| 2x | 2.67% | ~50% |
+| 3x | 3.00% | ~33% |
+| 5x | 3.33% | ~20% |
+| 10x | 3.64% | ~10% |
+
+Bitcoin has moved 10% in a day more than once. A liquidated short leaves you
+long spot into the rally that killed it — which is how this trade actually ends,
+and nothing in the funding history can show it.
+
+**The comparison that decides it: short-dated government bonds or a savings
+account.** If risk-free pays roughly 3%, this earns the same while adding
+exchange counterparty risk, liquidation risk, daily management and a taxable
+event every eight hours. Same return, more risk, more work. That is a worse
+trade however smooth the funding looks.
+
+SOL did not pay at all, which is worth noting: the effect depends on persistent
+long demand and is not a property of crypto in general.
+
+Reproduce with:
+
+```bash
+python scripts/funding_carry.py --days 625
+```
 
 ## What would have to be different
 

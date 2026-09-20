@@ -102,3 +102,55 @@ def test_timestamps_are_read_as_utc():
     assert stats is not None
     assert stats.first.tzinfo is UTC
     assert stats.first == datetime.fromtimestamp(START_MS / 1000, tz=UTC)
+
+
+# ------------------------------------------------- return on deployed capital
+# Funding accrues on notional, but the trade ties up spot capital AND futures
+# margin. Quoting the notional figure alone overstates the return, which is the
+# specific way carry trades get oversold.
+
+
+def capital_multiple(leverage: float) -> float:
+    """Capital tied up per unit of notional: the spot leg plus the short margin."""
+    return 1.0 + 1.0 / leverage
+
+
+@pytest.mark.parametrize(
+    "leverage,expected_capital",
+    [(2.0, 1.5), (3.0, 4 / 3), (5.0, 1.2), (10.0, 1.1)],
+)
+def test_capital_required_per_unit_of_notional(leverage, expected_capital):
+    assert capital_multiple(leverage) == pytest.approx(expected_capital)
+
+
+def test_return_on_capital_is_always_below_the_notional_headline():
+    """There is no leverage at which the two are equal: spot is always funded."""
+    notional_yield = 0.04
+    for leverage in (2.0, 3.0, 5.0, 10.0, 50.0):
+        on_capital = notional_yield / capital_multiple(leverage)
+        assert on_capital < notional_yield
+
+
+def test_the_headline_four_percent_is_three_percent_on_capital():
+    """The correction that matters, against the measured BTC figure."""
+    # 4.00%/yr on notional, short leg at 3x: $10,000 spot + $3,333 margin.
+    on_capital = 0.0400 / capital_multiple(3.0)
+
+    assert on_capital == pytest.approx(0.0300, abs=0.0001)
+
+
+def test_higher_leverage_improves_return_and_shortens_the_distance_to_ruin():
+    """The trade-off that the table must not hide."""
+    notional_yield = 0.04
+    low, high = 2.0, 10.0
+
+    assert notional_yield / capital_multiple(high) > notional_yield / capital_multiple(low)
+    # ...but the adverse move that wipes the short leg shrinks proportionally.
+    assert (100.0 / high) < (100.0 / low)
+    assert 100.0 / high == pytest.approx(10.0), "10x dies on roughly a 10% rally"
+
+
+def test_a_negative_carry_stays_negative_at_every_leverage():
+    """Leverage cannot rescue a trade that does not pay. SOL did not pay."""
+    for leverage in (2.0, 3.0, 5.0, 10.0):
+        assert -0.0055 / capital_multiple(leverage) < 0
