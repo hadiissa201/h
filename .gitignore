@@ -44,3 +44,7 @@ htmlcov/
 .idea/
 .vscode/
 .DS_Store
+
+# memecoin research
+/memecoin-research/probe_report.json
+/memecoin-research/*.db
