@@ -14,10 +14,47 @@ against the complete population instead of against screenshots.
 |---|---|
 | `probe/` | Verifies every external service from the machine that will run the collector |
 | `poc/` | Proof of concept: detect → market data → simulated exit → Postgres |
-| `tests/` | Offline tests: parsing, storage, idempotency, and the no-wallet guarantee |
+| `collector/` | **The Phase 1 collector.** Runs continuously, records everything |
+| `tests/` | Offline tests: sampling, scheduling, coverage, and the no-wallet guarantee |
 
-Not here: the continuous collector. It is not built until the probe proves the
-services work and you approve the results.
+## Running the collector
+
+```bash
+pip install -r requirements.txt
+createdb memecoin_research
+
+# see what this configuration can sustain, change nothing
+python -m collector --plan
+
+# collect
+python -m collector --workers 4
+```
+
+Status while it runs: `http://127.0.0.1:8787/status`.
+
+### Why it samples
+
+Not a preference — arithmetic. Each token costs ~217 DexScreener calls over
+7 tracked days. DexScreener was **measured** at ~300 req/min sustained (297/297
+over 60s, no 429) and Jupiter at **~120/min** (429 after 121 requests in 24.9s,
+far below what its burst suggested). That caps the collector near **11,100
+concurrently tracked tokens**, i.e. **~1,590 new tokens/day** — against tens of
+thousands of daily launches.
+
+The sample is a deterministic hash of the mint address, and the rate is stored
+on every token. That matters more than it looks: a *deliberate* random sample is
+unbiased and can be weighted back to the population. Keeping "whatever we could
+keep up with" is not a sample — it over-represents quiet periods, because quiet
+is exactly when there is spare capacity.
+
+`python -m collector --plan` recomputes all of this from the live config.
+
+### Detection uses Helius, not the public RPC
+
+Measured over comparable 300-second windows: public RPC ~29.6 creations/min,
+Helius ~41.2/min. The public node drops messages under load **and reports no
+error** — it simply looks like a quieter market. Set
+`MEMECOIN_HELIUS_API_KEY` or the collector warns and under-counts.
 
 ## Run the probe first
 
@@ -94,10 +131,28 @@ Either way `collection_gaps` records every window we were blind, so Phase 2 can
 restrict itself to covered time rather than reading our downtime as an absence
 of launches.
 
+## Rules Phase 2 must obey
+
+`collector/research.py` exists so a strategy replay cannot accidentally cheat:
+
+- **Entry is priced at `detected_ts`, never `launch_ts`.** Pricing at on-chain
+  creation hands the backtest latency we do not possess.
+- **Only `succeeded IS NOT NULL` counts as evidence.** A transport failure is
+  not a rug.
+- **Queries are restricted to covered windows.** Outside them, the absence of
+  launches is the absence of a collector.
+- **Fills happen only at observed prices.** Interpolating invents liquidity
+  that was never demonstrated.
+- **Weight by `population_weight()`** before quoting any population rate.
+
 ## Status
 
-Verified offline: parsing, storage, idempotency, the no-wallet guarantee
-(60 tests). **Not yet verified: anything requiring the network.** The build
-environment blocks Solana, Helius, DexScreener and Jupiter at the proxy, so
-every endpoint, rate limit and program ID in `probe/constants.py` is a
-**candidate** until the probe confirms it on the target machine.
+Every external service verified on the target machine: **28 checks, 0 failed,
+0 unverified** (`python -m probe`). Offline: 98 tests covering parsing, storage,
+idempotency, sampling uniformity, the cadence ladder, coverage accounting, and
+the no-wallet guarantee.
+
+The launch rate is the one number still settling: 1,025,280/day → 54,432/day as
+three separate counting bugs were found and fixed. It is measured, never
+assumed, and the collector is sized from the live configuration rather than
+from any figure written down here.

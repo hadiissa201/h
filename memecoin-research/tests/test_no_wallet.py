@@ -16,7 +16,8 @@ import pathlib
 import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-SOURCE_DIRS = ("poc", "probe")
+# Every package, including the collector that runs unattended for weeks.
+SOURCE_DIRS = ("poc", "probe", "collector")
 
 # Libraries that can produce a signature or submit a transaction. None of them
 # belongs in a package whose entire job is to observe.
@@ -49,7 +50,7 @@ def source_files() -> list[pathlib.Path]:
 
 def test_there_are_source_files_to_check():
     """Guards against the suite passing because it scanned nothing."""
-    assert len(source_files()) >= 5
+    assert len(source_files()) >= 12
 
 
 @pytest.mark.parametrize("path", source_files(), ids=lambda p: p.name)
