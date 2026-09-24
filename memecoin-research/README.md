@@ -22,7 +22,7 @@ services work and you approve the results.
 ## Run the probe first
 
 ```bash
-pip install -r requirements.txt
+pip install -r requirements-probe.txt            # httpx + websockets only
 python -m probe --ws-seconds 300                 # public endpoints
 python -m probe --helius-key YOUR_KEY --ws-seconds 300
 ```
@@ -38,6 +38,7 @@ assumed.
 ## Then the proof of concept
 
 ```bash
+pip install -r requirements.txt                  # adds the database stack
 createdb memecoin_poc
 python -m poc --database-url postgresql+psycopg://localhost/memecoin_poc --detect-seconds 120
 

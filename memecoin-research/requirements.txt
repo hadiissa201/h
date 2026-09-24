@@ -1,6 +1,9 @@
-httpx==0.28.1
-websockets==14.1
-SQLAlchemy==2.0.36
-psycopg[binary]==3.2.3
-pydantic==2.10.4
-pydantic-settings==2.7.0
+# Full stack, needed for the proof of concept (which writes to Postgres).
+# Ranges rather than exact pins: exact pins of psycopg-binary break on newer
+# Python versions that the old release has no wheel for.
+-r requirements-probe.txt
+
+SQLAlchemy>=2.0.36,<3
+psycopg[binary]>=3.2.10,<4
+pydantic>=2.10,<3
+pydantic-settings>=2.7,<3

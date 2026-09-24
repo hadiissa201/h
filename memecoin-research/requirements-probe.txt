@@ -1,0 +1,5 @@
+# The probe only talks to HTTP and websockets. It deliberately does NOT pull in
+# the database stack, so verifying the external services never blocks on a
+# Postgres driver that has no wheel for your Python version.
+httpx>=0.28,<1
+websockets>=14,<16
