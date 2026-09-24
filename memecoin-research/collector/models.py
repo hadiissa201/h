@@ -387,6 +387,53 @@ class PendingDetection(Base):
     give_up_reason: Mapped[str | None] = mapped_column(Text)
 
 
+class PaperPosition(Base):
+    """A hypothetical position. No money, no wallet, no order ever placed.
+
+    The realism that matters is in the exit. A position can only be closed at a
+    moment when the exit simulation actually found a route -- so if a token
+    becomes unsellable while the paper position is open, the position STAYS
+    OPEN, exactly as real money would. Closing it anyway at the last quoted
+    price is the single most common way a memecoin backtest lies.
+    """
+
+    __tablename__ = "paper_positions"
+    __table_args__ = (
+        UniqueConstraint("token_id", "strategy", name="uq_paper_token_strategy"),
+        Index("ix_paper_open", "is_open", "strategy"),
+    )
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True, autoincrement=True)
+    token_id: Mapped[int] = mapped_column(FK_TYPE, ForeignKey("tokens.id"), index=True)
+    strategy: Mapped[str] = mapped_column(String(64), index=True)
+
+    opened_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    entry_price_usd: Mapped[float] = mapped_column(Price)
+    notional_usd: Mapped[float] = mapped_column(Money)
+    entry_liquidity_usd: Mapped[float | None] = mapped_column(Money)
+    # Age at entry, because "we could not have been this early" is the easiest
+    # way for a replay to invent an edge.
+    token_age_at_entry_s: Mapped[float | None] = mapped_column(Numeric(20, 3))
+
+    is_open: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    closed_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    exit_price_usd: Mapped[float | None] = mapped_column(Price)
+    exit_reason: Mapped[str | None] = mapped_column(String(64))
+
+    peak_price_usd: Mapped[float | None] = mapped_column(Price)
+    peak_multiple: Mapped[float | None] = mapped_column(Numeric(20, 6))
+    # What the position WOULD have made if an exit had always been available.
+    # Recorded next to the real figure so the cost of unsellability is visible
+    # rather than assumed away.
+    unrealisable_peak_multiple: Mapped[float | None] = mapped_column(Numeric(20, 6))
+
+    gross_pnl_usd: Mapped[float | None] = mapped_column(Money)
+    costs_usd: Mapped[float | None] = mapped_column(Money)
+    net_pnl_usd: Mapped[float | None] = mapped_column(Money)
+    price_impact_at_exit_pct: Mapped[float | None] = mapped_column(Numeric(20, 10))
+    blocked_exits: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class CollectorRun(Base):
     """Uptime record. Pairs with collection_gaps to bound what we can claim."""
 

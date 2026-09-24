@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from collector.config import CollectorSettings
 from collector.detector import Detection, LaunchDetector
+from collector import paper
 from collector.models import (
     Base,
     CollectorRun,
@@ -328,6 +329,24 @@ class Collector:
             session.commit()
             log.info("collection gap closed")
 
+    # ----------------------------------------------------------- paper trading
+    def paper_loop(self) -> None:
+        """Run the paper strategies against whatever has been observed.
+
+        Deliberately its own thread and its own cadence: it must never delay
+        collection. If paper trading falls behind, the dataset is unaffected --
+        the reverse would not be true.
+        """
+        while not self.stop_event.is_set():
+            try:
+                with self.Session() as session:
+                    counts = paper.run_once(session)
+                if any(counts.values()):
+                    log.info("paper: %s", counts)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("paper trader error: %s", exc)
+            self.stop_event.wait(self.settings.paper_interval_s)
+
     # ---------------------------------------------------------------- status
     def status(self) -> dict:
         with self.Session() as session:
@@ -355,6 +374,8 @@ class Collector:
                     select(func.count()).select_from(PendingDetection)
                     .where(PendingDetection.give_up_reason.is_not(None))),
             }
+        with self.Session() as session:
+            paper_summary = paper.summary(session)
         return {
             "version": VERSION,
             "uptime_s": round(time.time() - self.started_at, 1),
@@ -365,6 +386,7 @@ class Collector:
             "pipeline": self.stats,
             "database": counts,
             "rate_limits": self.limiters.snapshot(),
+            "paper_trading": paper_summary,
         }
 
 
@@ -415,6 +437,10 @@ def run(settings: CollectorSettings, workers: int = 4) -> int:
     for index in range(2):
         threading.Thread(target=collector.resolver_loop, daemon=True,
                          name=f"resolver-{index}").start()
+    if settings.paper_trading_enabled:
+        threading.Thread(target=collector.paper_loop, daemon=True,
+                         name="paper").start()
+        log.info("paper trading ON -- hypothetical only, no wallet, no orders")
 
     reason = "normal"
 

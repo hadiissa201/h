@@ -16,6 +16,8 @@ from collector.models import (  # noqa: F401
     HolderSnapshot,
     LiquidityEvent,
     Observation,
+    PaperPosition,
+    PendingDetection,
     Pool,
     RawPayload,
     SimulatedExit,
@@ -27,6 +29,6 @@ from collector.models import (  # noqa: F401
 __all__ = [
     "Base", "Token", "Pool", "Observation", "SimulatedExit", "Event",
     "RawPayload", "CollectionGap", "Creator", "TokenStatus", "WorkItem",
-    "HolderSnapshot", "LiquidityEvent",
+    "HolderSnapshot", "LiquidityEvent", "PaperPosition", "PendingDetection",
     "CollectorRun",
 ]

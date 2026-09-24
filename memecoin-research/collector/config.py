@@ -106,6 +106,14 @@ class CollectorSettings(BaseSettings):
     dormant_liquidity_usd: float = 100.0
     dormant_after_consecutive: int = 5
 
+    # -------------------------------------------------------- paper trading
+    # Hypothetical positions against the live feed. Nothing is ever bought or
+    # sold; there is no wallet in this codebase to do it with. Its job is to
+    # answer "would these rules have made money" with an accumulating record
+    # rather than an opinion.
+    paper_trading_enabled: bool = True
+    paper_interval_s: float = 20.0
+
     # ----------------------------------------------------------- operations
     http_timeout_s: float = 20.0
     reconnect_base_delay_s: float = 1.0

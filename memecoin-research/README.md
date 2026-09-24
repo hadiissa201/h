@@ -131,6 +131,44 @@ Either way `collection_gaps` records every window we were blind, so Phase 2 can
 restrict itself to covered time rather than reading our downtime as an absence
 of launches.
 
+## Paper trading
+
+Runs alongside the collector, on the same live feed. **No wallet, no orders, no
+money** — there is no key in this codebase to place one with. Its job is to turn
+"would these rules have made money?" into an accumulating record instead of an
+opinion.
+
+Three default rule sets, deliberately ordinary and unoptimised (tuning before
+the base rate is known is how a curve gets fitted to noise):
+
+| Strategy | Entry | Exit |
+|---|---|---|
+| `early_200` | < 10 min old, ≥ $5k liquidity, ≥ 5 buys/5m | +200%, −50%, or 1h |
+| `patient_200` | < 30 min old, ≥ $20k liquidity, ≥ 15 buys/5m | +200%, −50%, or 3h |
+| `quick_50` | < 10 min old, ≥ $5k liquidity | +50%, −30%, or 15m |
+
+**What makes the result trustworthy** — each rule exists because its absence is
+a known way for a memecoin backtest to lie:
+
+- **A position closes only when an exit genuinely existed.** If the token became
+  unsellable while held, the position *stays open*, exactly as real money would
+  be stuck. Closing at the last quoted price instead turns a rug that printed
+  +300% into a clean winner.
+- **The most recent exit attempt decides, and verdicts go stale.** Skipping past
+  an unknown to reach an older success assumes our failure to get an answer is
+  unrelated to the token — but a vanished pool is exactly what breaks a quote.
+- **It never buys what has never been sellable.**
+- **Costs include the measured price impact**, not just fees. On a thin pool the
+  impact dwarfs the fee.
+- **The chart peak and the sellable peak are tracked separately.** The gap
+  between them is the measured cost of unsellability.
+
+Progress shows up under `paper_trading` at the status endpoint. `stuck_no_exit`
+counts positions the rules wanted to close but couldn't — those are **not**
+counted as profit.
+
+Turn it off with `MEMECOIN_PAPER_TRADING_ENABLED=false`.
+
 ## Rules Phase 2 must obey
 
 `collector/research.py` exists so a strategy replay cannot accidentally cheat:
