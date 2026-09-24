@@ -64,6 +64,11 @@ class ProgramActivity:
     program_id: str
     notifications: int = 0
     signatures: set[str] = field(default_factory=set)
+    # Signatures of transactions that looked like a creation. Kept so the probe
+    # can resolve a REAL freshly-launched mint afterwards and quote it -- the
+    # only way to test the "no route" path, which is the signal this whole
+    # project rests on. A quote for SOL/USDC proves nothing about a thin token.
+    create_signatures: list[str] = field(default_factory=list)
     instructions: Counter = field(default_factory=Counter)
     samples: dict[str, str] = field(default_factory=dict)
 
@@ -124,12 +129,18 @@ async def _listen_all(ws_url: str, duration_s: float) -> dict[int, ProgramActivi
                     continue
                 name = match.group(1)
                 item.instructions[name] += 1
-                if name not in item.samples and name in CREATE_CANDIDATES:
-                    item.samples[name] = f"{value.get('signature', '?')[:16]}... {line[:90]}"
+                if name in CREATE_CANDIDATES:
+                    sig = value.get("signature")
+                    if sig and len(item.create_signatures) < 25:
+                        item.create_signatures.append(sig)
+                    if name not in item.samples:
+                        item.samples[name] = f"{(sig or '?')[:16]}... {line[:90]}"
     return activity
 
 
-async def probe_launchpads(report: Report, ws_url: str, duration_s: float) -> None:
+async def probe_launchpads(report: Report, ws_url: str,
+                           duration_s: float) -> list[str]:
+    """Returns signatures of creation transactions, for mint resolution."""
     print(f"\n  listening on {ws_url} for {duration_s:.0f}s "
           f"({len(LAUNCHPAD_CANDIDATES)} programs, ONE multiplexed connection)...",
           flush=True)
@@ -138,9 +149,10 @@ async def probe_launchpads(report: Report, ws_url: str, duration_s: float) -> No
     except Exception as exc:  # noqa: BLE001 -- the probe reports, never crashes
         report.add(Check("launchpad", "listen", Outcome.FAILED,
                          f"{type(exc).__name__}: {exc}", ws_url))
-        return
+        return []
 
     total_create = 0
+    creation_signatures: list[str] = []
     for item in activity.values():
         if item.notifications == 0:
             report.add(Check("launchpad", item.label, Outcome.UNVERIFIED,
@@ -151,6 +163,7 @@ async def probe_launchpads(report: Report, ws_url: str, duration_s: float) -> No
 
         create = item.create_like()
         total_create += create
+        creation_signatures.extend(item.create_signatures)
         top = item.instructions.most_common(12)
         report.add(Check(
             "launchpad", item.label, Outcome.OK,
@@ -177,14 +190,16 @@ async def probe_launchpads(report: Report, ws_url: str, duration_s: float) -> No
                   "projected_per_day": round(rate * 60 * 24),
                   "window_seconds": duration_s},
     ))
+    return creation_signatures
 
 
-def run_launchpad_probe(report: Report, ws_url: str, duration_s: float) -> None:
+def run_launchpad_probe(report: Report, ws_url: str, duration_s: float) -> list[str]:
     try:
-        asyncio.run(probe_launchpads(report, ws_url, duration_s))
+        return asyncio.run(probe_launchpads(report, ws_url, duration_s))
     except Exception as exc:  # noqa: BLE001
         report.add(Check("launchpad", "websocket", Outcome.FAILED,
                          f"{type(exc).__name__}: {exc}", ws_url))
+        return []
 
 
 async def _ws_reachable(ws_url: str) -> tuple[bool, str]:

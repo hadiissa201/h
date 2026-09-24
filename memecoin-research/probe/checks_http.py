@@ -8,6 +8,7 @@ collector is later configured from that answer rather than from a guess.
 from __future__ import annotations
 
 import time
+from collections import Counter
 from typing import Any
 
 import httpx
@@ -296,3 +297,98 @@ def check_jupiter_swap_build(report: Report, client: httpx.Client,
         except Exception as exc:  # noqa: BLE001
             report.add(Check("jupiter", f"swap build {name}", Outcome.FAILED,
                              f"{type(exc).__name__}: {exc}", url))
+
+
+# ------------------------------------------------- resolving a real new mint
+def resolve_mint_from_signature(report: Report, client: httpx.Client, rpc_url: str,
+                                signatures: list[str]) -> str | None:
+    """Turn a creation transaction into the mint address it created.
+
+    The collector needs this anyway: detection gives a signature, and every
+    downstream call needs the mint. Verifying it here means the probe proves
+    the whole detection chain, not just that messages arrive.
+
+    The new mint is read from postTokenBalances, which lists the token accounts
+    the transaction touched. Tries several signatures because a create-like
+    instruction does not always mean a mint was born.
+    """
+    for signature in signatures[:8]:
+        try:
+            resp, ms = _timed(
+                _rpc, client, rpc_url, "getTransaction",
+                [signature, {"encoding": "jsonParsed", "maxSupportedTransactionVersion": 0}],
+            )
+            body = resp.json()
+            result = body.get("result")
+            if not result:
+                continue
+            balances = (result.get("meta") or {}).get("postTokenBalances") or []
+            mints = {b.get("mint") for b in balances if b.get("mint")}
+            mints.discard(WSOL_MINT)
+            mints.discard(USDC_MINT)
+            if not mints:
+                continue
+            mint = sorted(mints)[0]
+            report.add(Check("solana-rpc", "resolve mint from signature", Outcome.OK,
+                             f"{signature[:16]}... -> {mint}", rpc_url,
+                             resp.status_code, ms, {"mint": mint, "signature": signature}))
+            return mint
+        except Exception as exc:  # noqa: BLE001
+            report.add(Check("solana-rpc", "resolve mint from signature", Outcome.FAILED,
+                             f"{type(exc).__name__}: {exc}", rpc_url))
+            return None
+    report.add(Check("solana-rpc", "resolve mint from signature", Outcome.UNVERIFIED,
+                     f"tried {min(8, len(signatures))} creation signatures, none carried a "
+                     "new mint in postTokenBalances", rpc_url))
+    return None
+
+
+def measure_sustained_rate(report: Report, client: httpx.Client, service: str,
+                           url: str, target_rps: float, seconds: float) -> None:
+    """Hold a steady request rate and see whether it survives.
+
+    A burst of 25 requests in 1.3s says nothing about a limit enforced per
+    minute. Sizing the collector off a burst is how you discover the real
+    ceiling in production, with a half-collected dataset. This paces requests
+    at a target rate for a sustained window and reports the first rejection.
+    """
+    interval = 1.0 / target_rps if target_rps > 0 else 0.0
+    sent = ok = 0
+    first_429_at: float | None = None
+    other_errors: list[str] = []
+    start = time.perf_counter()
+
+    while time.perf_counter() - start < seconds:
+        cycle = time.perf_counter()
+        try:
+            resp = client.get(url, timeout=TIMEOUT)
+            sent += 1
+            if resp.status_code == 200:
+                ok += 1
+            elif resp.status_code == 429:
+                first_429_at = time.perf_counter() - start
+                break
+            else:
+                other_errors.append(str(resp.status_code))
+        except Exception as exc:  # noqa: BLE001
+            other_errors.append(type(exc).__name__)
+            sent += 1
+        nap = interval - (time.perf_counter() - cycle)
+        if nap > 0:
+            time.sleep(nap)
+
+    elapsed = time.perf_counter() - start
+    actual = sent / elapsed if elapsed > 0 else 0.0
+    if first_429_at is not None:
+        detail = (f"429 after {sent} requests / {first_429_at:.1f}s at "
+                  f"{target_rps:.1f} req/s target -- THIS is the real ceiling")
+    else:
+        detail = (f"held {actual:.1f} req/s for {elapsed:.0f}s, {ok}/{sent} OK, "
+                  "no 429 -- sustainable at this rate")
+    if other_errors:
+        detail += f" | non-200s: {Counter(other_errors).most_common(3)}"
+    report.add(Check(service, f"sustained {target_rps:.0f} req/s", Outcome.OK, detail, url,
+                     evidence={"target_rps": target_rps, "actual_rps": round(actual, 2),
+                               "sent": sent, "ok": ok, "seconds": round(elapsed, 1),
+                               "first_429_after_s": first_429_at,
+                               "other_errors": Counter(other_errors).most_common(5)}))

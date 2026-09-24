@@ -27,6 +27,8 @@ import httpx
 
 from probe.checks_http import (
     check_dexscreener,
+    measure_sustained_rate,
+    resolve_mint_from_signature,
     check_helius,
     check_jupiter_illiquid,
     check_jupiter_quote,
@@ -54,6 +56,11 @@ def main() -> int:
                         help="how long to listen for launches (longer = better rate estimate)")
     parser.add_argument("--rate-burst", type=int, default=25,
                         help="requests used to probe each rate limit")
+    parser.add_argument("--sustained-seconds", type=float, default=60.0,
+                        help="how long to hold a steady rate (0 to skip). A burst "
+                             "says nothing about a per-minute limit.")
+    parser.add_argument("--sustained-rps", type=float, default=5.0,
+                        help="target rate for the sustained test")
     parser.add_argument("--test-mint", default=None,
                         help="a real low-liquidity mint to quote (proves the "
                              "no-route path, which is the 'cannot sell' signal)")
@@ -69,39 +76,63 @@ def main() -> int:
     with httpx.Client(follow_redirects=True,
                       headers={"User-Agent": "memecoin-research-probe/0.1"}) as client:
 
-        print("\n[1/5] Solana RPC (public)")
+        print("\n[1/6] Solana RPC (public)")
         check_rpc(report, client, PUBLIC_RPC, "solana-rpc")
         check_rpc_simulate(report, client, PUBLIC_RPC, "solana-rpc")
 
-        print("\n[2/5] Helius")
+        print("\n[2/6] Helius")
         check_helius(report, client, args.helius_key)
 
-        print("\n[3/5] DexScreener")
+        print("\n[3/6] DexScreener")
         working = check_dexscreener(report, client)
         if working:
             measure_rate_limit(report, client, "dexscreener",
                                f"{DEXSCREENER_BASE}/latest/dex/tokens/{WSOL_MINT}",
                                args.rate_burst)
 
-        print("\n[4/5] Jupiter (the exit-simulation path)")
-        quote_url = check_jupiter_quote(report, client)
-        if quote_url:
-            check_jupiter_swap_build(report, client, quote_url)
-            check_jupiter_illiquid(report, client, quote_url, args.test_mint)
-            measure_rate_limit(report, client, "jupiter",
-                               f"{quote_url}?inputMint={WSOL_MINT}"
-                               f"&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-                               f"&amount=100000000&slippageBps=100",
-                               args.rate_burst)
-
-        print("\n[5/5] Launchpad detection + REAL launch rate")
+        print("\n[4/6] Launchpad detection + REAL launch rate")
+        # Runs BEFORE Jupiter so a genuinely fresh, thin mint is available to
+        # quote. Quoting SOL/USDC proves routing works; it proves nothing about
+        # whether a two-minute-old memecoin can be sold, which is the question.
+        fresh_mint = args.test_mint
         if args.skip_ws:
             print("  (skipped)")
         else:
             ws_url = HELIUS_WS_TEMPLATE.format(key=args.helius_key) \
                 if args.helius_key else PUBLIC_WS
             if check_ws_reachable(report, ws_url, "websocket"):
-                run_launchpad_probe(report, ws_url, args.ws_seconds)
+                signatures = run_launchpad_probe(report, ws_url, args.ws_seconds)
+                if signatures and not fresh_mint:
+                    fresh_mint = resolve_mint_from_signature(
+                        report, client, args.rpc_url, signatures)
+
+        print("\n[5/6] Jupiter (the exit-simulation path)")
+        quote_url = check_jupiter_quote(report, client)
+        if quote_url:
+            check_jupiter_swap_build(report, client, quote_url)
+            check_jupiter_illiquid(report, client, quote_url, fresh_mint)
+            measure_rate_limit(report, client, "jupiter",
+                               f"{quote_url}?inputMint={WSOL_MINT}"
+                               f"&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+                               f"&amount=100000000&slippageBps=100",
+                               args.rate_burst)
+
+        print("\n[6/6] Sustained rate (the number that sizes the collector)")
+        if args.sustained_seconds <= 0:
+            print("  (skipped)")
+        else:
+            if working:
+                measure_sustained_rate(
+                    report, client, "dexscreener",
+                    f"{DEXSCREENER_BASE}/latest/dex/tokens/{WSOL_MINT}",
+                    args.sustained_rps, args.sustained_seconds)
+            if quote_url:
+                measure_sustained_rate(
+                    report, client, "jupiter",
+                    f"{quote_url}?inputMint={WSOL_MINT}"
+                    f"&outputMint=EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+                    f"&amount=100000000&slippageBps=100",
+                    args.sustained_rps, args.sustained_seconds)
 
     # ------------------------------------------------------------------ verdict
     counts = report.counts()
