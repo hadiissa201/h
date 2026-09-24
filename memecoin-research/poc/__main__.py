@@ -42,7 +42,7 @@ from poc.store import (
     upsert_pool,
     upsert_token,
 )
-from probe.checks_ws import CREATE_HINTS
+from probe.checks_ws import CREATE_CANDIDATES, INSTRUCTION_RE
 from probe.constants import DEXSCREENER_BASE, LAUNCHPAD_CANDIDATES, PUBLIC_RPC, PUBLIC_WS
 
 RESULTS: list[tuple[str, bool, str]] = []
@@ -84,7 +84,12 @@ async def _detect(ws_url: str, seconds: float, want: int) -> list[dict]:
                 msg = json.loads(raw)
                 value = (msg.get("params") or {}).get("result", {}).get("value") or {}
                 logs = value.get("logs") or []
-                if not any(h in line for line in logs for h in CREATE_HINTS):
+                # Exact instruction names, never substrings: "Instruction: Create"
+                # as a substring also matches CreateIdempotent, which fires for
+                # every first-time BUYER and inflated the launch rate ~25x.
+                names = {m.group(1) for line in logs
+                         if (m := INSTRUCTION_RE.search(line))}
+                if not (names & CREATE_CANDIDATES):
                     continue
                 mint = _mint_from_logs(logs)
                 found.append({

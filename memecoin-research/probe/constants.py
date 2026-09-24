@@ -26,14 +26,14 @@ SIMULATION_FEE_PAYER = "11111111111111111111111111111111"
 # ---------------------------------------------------------- Jupiter endpoints
 # Jupiter has served quotes from several hosts. Probe all of them; the collector
 # uses whichever the probe confirms, rather than a URL baked in from memory.
+# quote-api.jup.ag was removed on 2026-09-24: DNS no longer resolves it
+# (getaddrinfo failed), measured by the probe rather than assumed.
 JUPITER_QUOTE_CANDIDATES = (
     ("lite-v1", "https://lite-api.jup.ag/swap/v1/quote"),
-    ("legacy-v6", "https://quote-api.jup.ag/v6/quote"),
     ("api-v1", "https://api.jup.ag/swap/v1/quote"),
 )
 JUPITER_SWAP_CANDIDATES = (
     ("lite-v1", "https://lite-api.jup.ag/swap/v1/swap"),
-    ("legacy-v6", "https://quote-api.jup.ag/v6/swap"),
     ("api-v1", "https://api.jup.ag/swap/v1/swap"),
 )
 
