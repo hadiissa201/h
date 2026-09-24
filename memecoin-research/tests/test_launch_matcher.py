@@ -68,3 +68,44 @@ def test_lines_without_an_instruction_are_ignored():
         "Program log: AnchorError caused by account: mint",
     ]
     assert names_in(noise) == set()
+
+
+# ------------------------------------------ counting transactions, not logs
+def test_one_transaction_logging_three_create_instructions_counts_once():
+    """A pump.fun creation logs Create AND InitializeMint2 AND Initialize.
+
+    Summing instruction occurrences counted that single token three times and
+    inflated the measured launch rate by 2-3x on top of the substring bug.
+    """
+    from probe.checks_ws import ProgramActivity
+
+    item = ProgramActivity(label="t", program_id="p")
+    for name in ("Create", "InitializeMint2", "Initialize"):
+        item.instructions[name] += 1
+        item.create_txs.add("SIG_ONE")
+    assert item.create_like() == 1
+
+
+def test_two_different_transactions_count_twice():
+    from probe.checks_ws import ProgramActivity
+
+    item = ProgramActivity(label="t", program_id="p")
+    item.create_txs.update({"SIG_ONE", "SIG_TWO"})
+    assert item.create_like() == 2
+
+
+def test_a_graduation_seen_on_two_programs_is_one_token():
+    """A migration transaction mentions both the bonding curve and the AMM,
+    so it arrives on two subscriptions and would otherwise be counted twice."""
+    from probe.checks_ws import ProgramActivity
+
+    curve = ProgramActivity(label="pumpfun", program_id="a")
+    amm = ProgramActivity(label="pumpswap", program_id="b")
+    curve.create_txs.add("SHARED_SIG")
+    amm.create_txs.add("SHARED_SIG")
+    amm.create_txs.add("AMM_ONLY")
+
+    per_program = curve.create_like() + amm.create_like()
+    unique = len(curve.create_txs | amm.create_txs)
+    assert per_program == 3
+    assert unique == 2, "the graduation must not be counted as two launches"

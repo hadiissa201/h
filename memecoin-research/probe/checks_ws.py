@@ -64,6 +64,11 @@ class ProgramActivity:
     program_id: str
     notifications: int = 0
     signatures: set[str] = field(default_factory=set)
+    # Signatures whose logs contained at least ONE create-like instruction.
+    # A SET, and counted per transaction rather than per instruction: a single
+    # token creation logs Create AND InitializeMint2 AND Initialize, so summing
+    # instruction occurrences counted one token three times.
+    create_txs: set[str] = field(default_factory=set)
     # Signatures of transactions that looked like a creation. Kept so the probe
     # can resolve a REAL freshly-launched mint afterwards and quote it -- the
     # only way to test the "no route" path, which is the signal this whole
@@ -73,8 +78,8 @@ class ProgramActivity:
     samples: dict[str, str] = field(default_factory=dict)
 
     def create_like(self) -> int:
-        return sum(n for name, n in self.instructions.items()
-                   if name in CREATE_CANDIDATES)
+        """Transactions that created something -- not instruction occurrences."""
+        return len(self.create_txs)
 
     def noise(self) -> int:
         return sum(n for name, n in self.instructions.items()
@@ -131,8 +136,10 @@ async def _listen_all(ws_url: str, duration_s: float) -> dict[int, ProgramActivi
                 item.instructions[name] += 1
                 if name in CREATE_CANDIDATES:
                     sig = value.get("signature")
-                    if sig and len(item.create_signatures) < 25:
-                        item.create_signatures.append(sig)
+                    if sig:
+                        item.create_txs.add(sig)
+                        if len(item.create_signatures) < 25:
+                            item.create_signatures.append(sig)
                     if name not in item.samples:
                         item.samples[name] = f"{(sig or '?')[:16]}... {line[:90]}"
     return activity
@@ -154,7 +161,10 @@ async def probe_launchpads(report: Report, ws_url: str,
                          f"{type(exc).__name__}: {exc}", ws_url))
         return []
 
-    total_create = 0
+    # One token migrating from a bonding curve to an AMM produces a single
+    # transaction that mentions BOTH programs, so it arrives on two
+    # subscriptions. Counting per program would count that token twice.
+    unique_create_txs: set[str] = set()
     creation_signatures: list[str] = []
     for item in activity.values():
         if item.notifications == 0:
@@ -165,7 +175,7 @@ async def probe_launchpads(report: Report, ws_url: str,
             continue
 
         create = item.create_like()
-        total_create += create
+        unique_create_txs |= item.create_txs
         creation_signatures.extend(item.create_signatures)
         top = item.instructions.most_common(12)
         report.add(Check(
@@ -183,14 +193,19 @@ async def probe_launchpads(report: Report, ws_url: str,
         print(f"         top instructions: "
               f"{', '.join(f'{n}={c}' for n, c in top[:8])}", flush=True)
 
+    total_create = len(unique_create_txs)
+    per_program = sum(item.create_like() for item in activity.values())
     rate = total_create / duration_s * 60.0
     report.add(Check(
         "launchpad", "MEASURED LAUNCH RATE", Outcome.OK if total_create else Outcome.UNVERIFIED,
-        f"~{rate:.1f} create-like/min (~{rate * 60 * 24:,.0f}/day) -- "
-        "read the instruction histogram before trusting this; "
-        "trading instructions are excluded but the candidate list is provisional",
+        f"~{rate:.1f} creation TXs/min (~{rate * 60 * 24:,.0f}/day), "
+        f"{total_create} unique of {per_program} per-program "
+        f"({per_program - total_create} seen on two programs -- graduations)",
         evidence={"creates_per_min": round(rate, 2),
                   "projected_per_day": round(rate * 60 * 24),
+                  "unique_creation_txs": total_create,
+                  "per_program_sum": per_program,
+                  "cross_program_duplicates": per_program - total_create,
                   "window_seconds": duration_s},
     ))
     return creation_signatures
