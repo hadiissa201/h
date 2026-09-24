@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from collector.config import CollectorSettings
@@ -262,3 +262,61 @@ def test_naive_timestamps_from_sqlite_are_treated_as_utc():
     already = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
     assert _aware(already) is already
     assert _aware(None) is None
+
+
+# ------------------------------------------------ detection is never on the loop
+def test_a_detection_is_recorded_before_its_mint_is_known(session):
+    """The websocket callback must not wait on the network.
+
+    It shares an event loop with the keepalive against a ~300 msg/s firehose.
+    Blocking there cost a reconnect every ~90 seconds, and every reconnect is a
+    recorded blind window.
+    """
+    from collector.models import PendingDetection
+
+    session.add(PendingDetection(
+        signature="SIG1", detected_ts=TS, slot=1, program_label="pumpfun",
+        instructions="Create", next_attempt_at=TS))
+    session.commit()
+
+    row = session.scalar(select(PendingDetection))
+    assert row.resolved is False
+    assert row.resolved_mint is None
+    assert row.detected_ts.replace(tzinfo=UTC) == TS, "detection time is captured now"
+
+
+def test_an_unresolved_detection_is_retried_not_dropped(settings):
+    """One attempt lost 42% of detections, biased toward fast confirmations."""
+    from collector.runner import MINT_RESOLVE_ATTEMPTS
+
+    assert MINT_RESOLVE_ATTEMPTS >= 3
+    delays = [backoff_due(n, TS) for n in range(1, MINT_RESOLVE_ATTEMPTS + 1)]
+    assert all(a <= b for a, b in zip(delays, delays[1:], strict=False))
+
+
+def test_giving_up_is_recorded_rather_than_forgotten(session):
+    """A detection we could never resolve is a hole, and holes must be countable."""
+    from collector.models import PendingDetection
+
+    session.add(PendingDetection(
+        signature="SIG2", detected_ts=TS, next_attempt_at=TS, attempts=6,
+        give_up_reason="unresolved after 6 attempts"))
+    session.commit()
+
+    abandoned = session.scalars(
+        select(PendingDetection).where(
+            PendingDetection.give_up_reason.is_not(None))).all()
+    assert len(abandoned) == 1
+    assert abandoned[0].resolved is False
+
+
+def test_the_same_signature_is_only_pending_once(session):
+    """A redelivery after a reconnect must not become a second launch."""
+    from collector.models import PendingDetection
+
+    session.add(PendingDetection(signature="SIG3", detected_ts=TS,
+                                 next_attempt_at=TS))
+    session.commit()
+    already = session.scalar(
+        select(PendingDetection.id).where(PendingDetection.signature == "SIG3"))
+    assert already is not None

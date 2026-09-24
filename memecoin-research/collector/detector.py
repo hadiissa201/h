@@ -143,8 +143,11 @@ class LaunchDetector:
 
     async def _session(self) -> None:
         log.info("detector connecting to %s", redact(self._ws_url))
-        async with websockets.connect(self._ws_url, ping_interval=20,
-                                      ping_timeout=20, close_timeout=5,
+        # This subscription delivers ~300 messages/second. A 20s ping timeout
+        # is not survivable at that rate: any momentary stall in parsing shows
+        # up as a keepalive failure, and every reconnect is a blind window.
+        async with websockets.connect(self._ws_url, ping_interval=30,
+                                      ping_timeout=90, close_timeout=5,
                                       max_size=8_000_000) as ws:
             labels = {}
             for index, (label, program_id) in enumerate(LAUNCHPAD_CANDIDATES):
@@ -181,8 +184,13 @@ class LaunchDetector:
         if not signature:
             return
 
-        names = {m.group(1) for line in (value.get("logs") or [])
-                 if (m := INSTRUCTION_RE.search(line))}
+        # Cheap rejection first. Running the regex over every log line of every
+        # message costs real CPU at 300 msg/s, and that CPU comes out of the
+        # event loop that also answers keepalive pings.
+        logs = value.get("logs") or []
+        if not any("Instruction: " in line for line in logs):
+            return
+        names = {m.group(1) for line in logs if (m := INSTRUCTION_RE.search(line))}
         creating = names & CREATE_CANDIDATES
         if not creating:
             return

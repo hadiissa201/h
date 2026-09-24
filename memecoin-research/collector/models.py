@@ -353,6 +353,40 @@ class WorkItem(Base):
     last_run_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class PendingDetection(Base):
+    """A detected creation whose mint is not resolved yet.
+
+    Exists because resolution CANNOT happen on the websocket event loop. Doing
+    the getTransaction call there blocked the loop, starved the keepalive, and
+    cost a reconnect every ~90 seconds -- each one a recorded blind window.
+
+    It is also retryable, which matters more: a transaction seen at `processed`
+    commitment is frequently not yet queryable, so a single attempt lost 42% of
+    all detections. That loss is not random -- it favours whatever confirms
+    fastest -- so it was bias, not noise.
+    """
+
+    __tablename__ = "pending_detections"
+    __table_args__ = (
+        UniqueConstraint("signature", name="uq_pending_signature"),
+        Index("ix_pending_unresolved", "resolved", "next_attempt_at"),
+    )
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True, autoincrement=True)
+    signature: Mapped[str] = mapped_column(String(128), index=True)
+    detected_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    slot: Mapped[int | None] = mapped_column(BigInteger)
+    program_label: Mapped[str | None] = mapped_column(String(64))
+    instructions: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    resolved: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    resolved_mint: Mapped[str | None] = mapped_column(String(128))
+    # Why we gave up, kept rather than deleted: a detection we could never
+    # resolve is a hole in coverage, and holes have to be countable.
+    give_up_reason: Mapped[str | None] = mapped_column(Text)
+
+
 class CollectorRun(Base):
     """Uptime record. Pairs with collection_gaps to bound what we can claim."""
 

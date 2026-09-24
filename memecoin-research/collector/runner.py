@@ -28,7 +28,15 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from collector.config import CollectorSettings
 from collector.detector import Detection, LaunchDetector
-from collector.models import Base, CollectorRun, Observation, SimulatedExit, Token, WorkItem
+from collector.models import (
+    Base,
+    CollectorRun,
+    Observation,
+    PendingDetection,
+    SimulatedExit,
+    Token,
+    WorkItem,
+)
 from collector.ratelimit import Limiters, build_limiters
 from collector.sampling import sample_score, should_track
 from collector.schedule import WorkKind, backoff_due, capacity, next_due
@@ -38,7 +46,10 @@ from probe.checks_http import resolve_mint_from_signature
 from probe.report import Report
 
 log = logging.getLogger("collector")
-VERSION = "phase1-0.1"
+VERSION = "phase1-0.2"
+# A transaction at `processed` commitment is often not queryable for a few
+# seconds. Give it several tries before calling the detection lost.
+MINT_RESOLVE_ATTEMPTS = 6
 
 
 class Collector:
@@ -96,48 +107,127 @@ class Collector:
 
     # -------------------------------------------------------------- detection
     def on_detection(self, detection: Detection) -> None:
-        """Admit or reject a launch. Sampling decides, and the decision is stored.
+        """Record the detection and return IMMEDIATELY.
 
-        A rejected token is never written: storing every launch we chose not to
-        track would be a second dataset with entirely different coverage. What
-        IS stored, on every admitted token, is the sample rate and score that
-        admitted it -- which is what lets Phase 2 weight back to the population.
+        This runs on the websocket event loop, which is also answering keepalive
+        pings against a ~300 message/second firehose. The previous version made
+        a blocking HTTP call here to resolve the mint; it starved the keepalive
+        and cost a reconnect roughly every 90 seconds, and every reconnect is a
+        blind window in the dataset.
+
+        So the only work done here is one small insert. Resolution -- which
+        needs the network and needs retries -- happens in a worker thread.
         """
         self.stats["detected"] += 1
         try:
             with self.Session() as session:
-                report = Report()  # resolve_mint_from_signature records into this
-                mint = resolve_mint_from_signature(
-                    report, self._client, self.settings.rpc_url, [detection.signature])
-                if not mint:
-                    self.stats["mint_unresolved"] += 1
+                exists = session.scalar(
+                    select(PendingDetection.id)
+                    .where(PendingDetection.signature == detection.signature))
+                if exists is not None:
                     return
-
-                score = sample_score(mint)
-                if not should_track(mint, self.settings.sample_rate):
-                    self.stats["skipped_by_sampling"] += 1
-                    return
-
-                token_id = upsert_token(
-                    session, chain="solana", address=mint,
+                session.add(PendingDetection(
+                    signature=detection.signature,
                     detected_ts=detection.detected_ts,
-                    detection_source=f"ws:{detection.program_label}",
-                    first_seen_slot=detection.slot,
-                    sample_score=score,
-                    sample_rate_at_detection=self.settings.sample_rate,
-                    is_tracked=True,
-                )
-                insert_event(session, token_id=token_id,
-                             event_ts=detection.detected_ts, kind="first_seen",
-                             detail={"program": detection.program_label,
-                                     "signature": detection.signature,
-                                     "instructions": list(detection.instructions)})
-                for kind in WorkKind:
-                    self._enqueue(session, token_id, kind, datetime.now(UTC))
+                    slot=detection.slot,
+                    program_label=detection.program_label,
+                    instructions=",".join(detection.instructions),
+                    next_attempt_at=datetime.now(UTC),
+                ))
                 session.commit()
-                self.stats["admitted"] += 1
         except Exception as exc:  # noqa: BLE001 -- a bad detection must not kill the loop
-            log.exception("detection handling failed: %s", exc)
+            log.exception("recording detection failed: %s", exc)
+
+    # ------------------------------------------------------- mint resolution
+    def resolver_loop(self) -> None:
+        """Resolve pending detections to mints, off the event loop, with retries.
+
+        A transaction seen at `processed` commitment is often not yet queryable
+        by getTransaction. One attempt lost 42% of detections -- and that loss
+        favours whatever confirms fastest, so it was systematic bias rather than
+        noise. Retrying with backoff turns it into a short delay instead.
+        """
+        while not self.stop_event.is_set():
+            try:
+                if not self._resolve_one():
+                    self.stop_event.wait(1.0)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("resolver error: %s", exc)
+                self.stop_event.wait(2.0)
+
+    def _resolve_one(self) -> bool:
+        with self.Session() as session:
+            pending = session.scalars(
+                select(PendingDetection)
+                .where(PendingDetection.resolved.is_(False),
+                       PendingDetection.give_up_reason.is_(None),
+                       PendingDetection.next_attempt_at <= datetime.now(UTC))
+                .order_by(PendingDetection.detected_ts)
+                .limit(1)
+            ).first()
+            if pending is None:
+                return False
+
+            pending.attempts += 1
+            # Claim it so a sibling resolver cannot take the same row.
+            pending.next_attempt_at = datetime.now(UTC) + timedelta(seconds=90)
+            session.commit()
+
+            mint = None
+            if self.limiters.helius.acquire(max_wait=10.0):
+                mint = resolve_mint_from_signature(
+                    Report(), self._client, self.settings.rpc_url,
+                    [pending.signature])
+
+            if not mint:
+                if pending.attempts >= MINT_RESOLVE_ATTEMPTS:
+                    pending.give_up_reason = (
+                        f"unresolved after {pending.attempts} attempts")
+                    self.stats["mint_unresolved"] += 1
+                else:
+                    # Short, growing delay: the usual cause is simply that the
+                    # transaction has not been confirmed yet.
+                    pending.next_attempt_at = backoff_due(pending.attempts, base_s=4.0)
+                session.commit()
+                return True
+
+            pending.resolved = True
+            pending.resolved_mint = mint
+            self._admit(session, pending, mint)
+            session.commit()
+            return True
+
+    def _admit(self, session: Session, pending, mint: str) -> None:  # noqa: ANN001
+        """Apply the sample decision and, if admitted, start tracking.
+
+        A rejected token is deliberately never written as a Token row: storing
+        every launch we chose not to track would be a second dataset with
+        entirely different coverage. The pending row keeps the record that we
+        saw it, which is what makes the sample auditable.
+        """
+        score = sample_score(mint)
+        if not should_track(mint, self.settings.sample_rate):
+            self.stats["skipped_by_sampling"] += 1
+            return
+
+        token_id = upsert_token(
+            session, chain="solana", address=mint,
+            detected_ts=pending.detected_ts,
+            detection_source=f"ws:{pending.program_label}",
+            first_seen_slot=pending.slot,
+            sample_score=score,
+            sample_rate_at_detection=self.settings.sample_rate,
+            is_tracked=True,
+        )
+        insert_event(session, token_id=token_id, event_ts=pending.detected_ts,
+                     kind="first_seen",
+                     detail={"program": pending.program_label,
+                             "signature": pending.signature,
+                             "instructions": (pending.instructions or "").split(","),
+                             "resolve_attempts": pending.attempts})
+        for kind in WorkKind:
+            self._enqueue(session, token_id, kind, datetime.now(UTC))
+        self.stats["admitted"] += 1
 
     def _enqueue(self, session: Session, token_id: int, kind: WorkKind,
                  due_at: datetime) -> None:
@@ -257,6 +347,13 @@ class Collector:
                 "exits_not_sellable": session.scalar(
                     select(func.count()).select_from(SimulatedExit)
                     .where(SimulatedExit.succeeded.is_(False))),
+                "pending_resolution": session.scalar(
+                    select(func.count()).select_from(PendingDetection)
+                    .where(PendingDetection.resolved.is_(False),
+                           PendingDetection.give_up_reason.is_(None))),
+                "detections_given_up": session.scalar(
+                    select(func.count()).select_from(PendingDetection)
+                    .where(PendingDetection.give_up_reason.is_not(None))),
             }
         return {
             "version": VERSION,
@@ -313,6 +410,11 @@ def run(settings: CollectorSettings, workers: int = 4) -> int:
     for index in range(workers):
         threading.Thread(target=collector.worker_loop, args=(index,),
                          daemon=True, name=f"worker-{index}").start()
+    # Resolution is network-bound and retried, so it gets its own threads and
+    # never touches the event loop.
+    for index in range(2):
+        threading.Thread(target=collector.resolver_loop, daemon=True,
+                         name=f"resolver-{index}").start()
 
     reason = "normal"
 
