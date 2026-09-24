@@ -151,3 +151,34 @@ def test_other_credential_parameter_names_are_covered():
     for param in ("api_key", "apikey", "token", "access_token"):
         out = redact(f"https://x/?{param}=supersecretvalue99")
         assert "supersecretvalue99" not in out, param
+
+
+def test_no_source_file_prints_a_url_without_redacting_it():
+    """A stored-but-redacted credential still leaks if it is printed raw.
+
+    This is the bug that leaked a live Helius key to the terminal: redaction
+    covered Check.endpoint and Check.detail, but a print() of the websocket URL
+    bypassed both. Any print of a variable whose name looks like a URL must go
+    through redact().
+    """
+    offenders: list[str] = []
+    for path in source_files():
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            stripped = line.strip()
+            if not stripped.startswith(("print(", 'print(f"')) and "print(" not in stripped:
+                continue
+            if "_url" not in stripped and "url}" not in stripped:
+                continue
+            if "redact(" in stripped:
+                continue
+            offenders.append(f"{path.name}:{number}: {stripped[:100]}")
+    assert not offenders, "URL printed without redact():\n" + "\n".join(offenders)
+
+
+def test_the_websocket_url_specifically_is_redacted_where_it_is_printed():
+    from probe.report import redact
+
+    leaked = "wss://mainnet.helius-rpc.com/?api-key=b0db2d45-a39a-4783-ba05-e9af5ca5ebe3"
+    assert "b0db2d45" not in redact(leaked)
+    source = (ROOT / "probe" / "checks_ws.py").read_text()
+    assert "redact(ws_url)" in source

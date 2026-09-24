@@ -34,7 +34,15 @@ def _timed(fn, *args, **kwargs) -> tuple[Any, float]:
     return result, (time.perf_counter() - start) * 1000.0
 
 
-def _rpc(client: httpx.Client, url: str, method: str, params: list) -> httpx.Response:
+def _rpc(client: httpx.Client, url: str, method: str,
+         params: list | dict) -> httpx.Response:
+    """A JSON-RPC call. `params` may be a list OR a dict.
+
+    Standard Solana methods take positional params (a list). Helius DAS methods
+    such as getAsset take NAMED params (an object) -- passing a list there gets
+    "invalid type: map, expected a string", which reads like a broken endpoint
+    when it is really the wrong call shape.
+    """
     return client.post(
         url,
         json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params},
@@ -97,7 +105,7 @@ def check_helius(report: Report, client: httpx.Client, api_key: str | None) -> s
     check_rpc(report, client, url, "helius")
     check_rpc_simulate(report, client, url, "helius")
     try:
-        resp, ms = _timed(_rpc, client, url, "getAsset", [{"id": USDC_MINT}])
+        resp, ms = _timed(_rpc, client, url, "getAsset", {"id": USDC_MINT})
         body = resp.json()
         if "error" in body:
             report.add(Check("helius", "DAS getAsset", Outcome.FAILED,

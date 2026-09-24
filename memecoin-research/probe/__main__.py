@@ -40,6 +40,7 @@ from probe.checks_http import (
 from probe.checks_ws import check_ws_reachable, run_launchpad_probe
 from probe.constants import (
     DEXSCREENER_BASE,
+    HELIUS_RPC_TEMPLATE,
     HELIUS_WS_TEMPLATE,
     PUBLIC_RPC,
     PUBLIC_WS,
@@ -52,6 +53,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--helius-key", default=os.environ.get("HELIUS_API_KEY"),
                         help="Helius API key (or set HELIUS_API_KEY)")
+    parser.add_argument("--rpc-url", default=None,
+                        help="Solana RPC for mint resolution (default: Helius if a "
+                             "key is set, else the public endpoint)")
     parser.add_argument("--ws-seconds", type=float, default=120.0,
                         help="how long to listen for launches (longer = better rate estimate)")
     parser.add_argument("--rate-burst", type=int, default=25,
@@ -67,6 +71,12 @@ def main() -> int:
     parser.add_argument("--skip-ws", action="store_true")
     parser.add_argument("--out", default="probe_report.json")
     args = parser.parse_args()
+
+    # Helius when we have a key: the public endpoint drops messages under load,
+    # which showed up as a LOWER measured launch rate rather than as an error.
+    rpc_url = args.rpc_url or (
+        HELIUS_RPC_TEMPLATE.format(key=args.helius_key)
+        if args.helius_key else PUBLIC_RPC)
 
     report = Report()
     print("=" * 78)
@@ -104,7 +114,7 @@ def main() -> int:
                 signatures = run_launchpad_probe(report, ws_url, args.ws_seconds)
                 if signatures and not fresh_mint:
                     fresh_mint = resolve_mint_from_signature(
-                        report, client, args.rpc_url, signatures)
+                        report, client, rpc_url, signatures)
 
         print("\n[5/6] Jupiter (the exit-simulation path)")
         quote_url = check_jupiter_quote(report, client)

@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 import websockets
 
 from probe.constants import LAUNCHPAD_CANDIDATES
-from probe.report import Check, Outcome, Report
+from probe.report import Check, Outcome, Report, redact
 
 INSTRUCTION_RE = re.compile(r"Program log: Instruction: (\w+)")
 
@@ -141,7 +141,10 @@ async def _listen_all(ws_url: str, duration_s: float) -> dict[int, ProgramActivi
 async def probe_launchpads(report: Report, ws_url: str,
                            duration_s: float) -> list[str]:
     """Returns signatures of creation transactions, for mint resolution."""
-    print(f"\n  listening on {ws_url} for {duration_s:.0f}s "
+    # redact(): the Helius websocket carries its key in the query string, and
+    # printing it puts a live credential in the terminal and in anything the
+    # user pastes. Storing it redacted is not enough if it is printed raw.
+    print(f"\n  listening on {redact(ws_url)} for {duration_s:.0f}s "
           f"({len(LAUNCHPAD_CANDIDATES)} programs, ONE multiplexed connection)...",
           flush=True)
     try:
