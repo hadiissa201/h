@@ -42,14 +42,24 @@ def preflight(settings) -> int:  # noqa: ANN001
         tail = settings.helius_api_key[-4:]
         print(f"  [ OK ] helius key        loaded (...{tail})")
 
+    # connect_timeout is load-bearing. Without it, a Postgres that is not
+    # running does not refuse the connection quickly on every platform -- it
+    # can sit there for minutes, and a preflight that hangs is worse than one
+    # that fails, because the user cannot tell it apart from one that is working.
+    print("  [....] database          connecting...", end="", flush=True)
     try:
-        engine = create_engine(settings.database_url, future=True)
+        engine = create_engine(
+            settings.database_url, future=True,
+            connect_args={"connect_timeout": 5},
+        )
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
-        print(f"  [ OK ] database          reachable ({engine.url.render_as_string()})")
+        print(f"\r  [ OK ] database          reachable "
+              f"({engine.url.render_as_string()})      ")
     except Exception as exc:  # noqa: BLE001
-        problems.append(f"Database unreachable: {type(exc).__name__}: {exc}")
-        print(f"  [FAIL] database          {type(exc).__name__}: {str(exc)[:120]}")
+        first_line = str(exc).strip().splitlines()[0]
+        problems.append(f"Database unreachable: {type(exc).__name__}: {first_line}")
+        print(f"\r  [FAIL] database          {first_line[:110]}      ")
 
     print(f"  [ OK ] sample rate       {settings.sample_rate} "
           f"({plan_note(settings)})")
