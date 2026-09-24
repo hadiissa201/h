@@ -103,3 +103,51 @@ def test_rpc_simulation_never_verifies_signatures():
     text = (ROOT / "poc" / "sources.py").read_text()
     assert '"sigVerify": False' in text
     assert '"sigVerify": True' not in text
+
+
+# ------------------------------------------------------------ secret hygiene
+def test_an_api_key_in_a_url_is_never_recorded():
+    """probe_report.json is meant to be shared, so it must carry no credentials.
+
+    Helius puts the key in the query string, so a recorded endpoint would leak
+    a live credential into a file the user is asked to paste into a chat.
+    """
+    from probe.report import Check, Outcome, Report, redact
+
+    secret = "abcd1234-dead-beef-0000-feedfacecafe"
+    url = f"https://mainnet.helius-rpc.com/?api-key={secret}"
+
+    assert secret not in redact(url)
+    assert "REDACTED" in redact(url)
+
+    report = Report()
+    report.add(Check("helius", "getHealth", Outcome.OK, f"called {url}", url))
+    serialized = report.to_json()
+    assert secret not in serialized, "the key reached the report file"
+    assert "helius-rpc.com" in serialized, "redaction destroyed the useful part"
+
+
+def test_redaction_keeps_a_tail_so_two_keys_can_be_told_apart():
+    from probe.report import redact
+
+    a = redact("https://x/?api-key=aaaaaaaaaaaaaaaa1111")
+    b = redact("https://x/?api-key=bbbbbbbbbbbbbbbb2222")
+    assert a != b
+    assert "1111" in a and "2222" in b
+
+
+def test_a_short_key_is_redacted_without_revealing_a_tail():
+    """A short value is mostly tail, so showing any of it gives too much away."""
+    from probe.report import redact
+
+    out = redact("https://x/?api-key=short123")
+    assert "short123" not in out
+    assert "..." not in out
+
+
+def test_other_credential_parameter_names_are_covered():
+    from probe.report import redact
+
+    for param in ("api_key", "apikey", "token", "access_token"):
+        out = redact(f"https://x/?{param}=supersecretvalue99")
+        assert "supersecretvalue99" not in out, param

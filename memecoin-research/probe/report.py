@@ -13,10 +13,34 @@ missing credential gets mistaken for a broken service.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
 from typing import Any
+
+
+# Helius and friends carry the key in the query string, so any URL recorded by
+# a check would put a live credential into probe_report.json -- a file meant to
+# be shared. Every endpoint is masked on the way in. The project's rule from day
+# one has been that secrets are never logged; a report is a log.
+_SECRET_PARAMS = ("api-key", "api_key", "apikey", "key", "token", "access_token")
+_SECRET_RE = re.compile(
+    r"(?i)\b(" + "|".join(re.escape(p) for p in _SECRET_PARAMS) + r")=([^&\s]+)"
+)
+
+
+def redact(text: str | None) -> str:
+    """Mask credentials in a URL or message. Keeps enough to tell keys apart."""
+    if not text:
+        return text or ""
+
+    def mask(match: re.Match[str]) -> str:
+        value = match.group(2)
+        tail = value[-4:] if len(value) > 8 else ""
+        return f"{match.group(1)}=***REDACTED{('...' + tail) if tail else ''}"
+
+    return _SECRET_RE.sub(mask, text)
 
 
 class Outcome(str, Enum):
@@ -36,6 +60,12 @@ class Check:
     latency_ms: float | None = None
     evidence: dict[str, Any] = field(default_factory=dict)
     checked_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
+
+    def __post_init__(self) -> None:
+        # Redact at construction, so no code path can record a raw key even by
+        # forgetting to call something.
+        self.endpoint = redact(self.endpoint)
+        self.detail = redact(self.detail)
 
     @property
     def symbol(self) -> str:
