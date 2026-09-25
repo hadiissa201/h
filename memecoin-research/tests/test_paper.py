@@ -407,3 +407,62 @@ def test_a_large_but_credible_move_is_still_taken(session):
     can_sell(session, token, later)
     assert manage_position(session, position, STRAT) == "take_profit"
     assert float(position.net_pnl_usd) > 0
+
+
+# ------------------------------------------------- the sniping experiment
+def test_the_sniper_pair_differs_only_in_timing():
+    """A controlled comparison, or it measures nothing.
+
+    A sniper bot's whole claim is that being early pays. If the two arms
+    differed in liquidity floors or exits too, a difference in outcome could
+    not be attributed to earliness.
+    """
+    from collector.paper import SNIPER_STRATEGIES
+
+    early, late = SNIPER_STRATEGIES
+    differing = [f for f in early.__dataclass_fields__
+                 if getattr(early, f) != getattr(late, f)]
+    assert set(differing) == {"name", "min_age_s", "max_age_s"}
+
+
+def test_the_early_arm_buys_immediately_and_the_late_arm_waits():
+    from collector.paper import SNIPER_STRATEGIES
+
+    early, late = SNIPER_STRATEGIES
+    assert early.min_age_s == 0.0
+    assert late.min_age_s >= 300.0
+    assert early.max_age_s <= late.min_age_s, "the windows must not overlap"
+
+
+def test_a_token_too_young_for_the_late_arm_is_rejected(session):
+    from collector.paper import SNIPER_STRATEGIES
+
+    early, late = SNIPER_STRATEGIES
+    token = make_token(session)
+    at = TS + timedelta(seconds=20)           # 20 seconds old
+    observe(session, token, at, 0.001, liquidity=500.0, buys=1)
+    can_sell(session, token, at)
+    session.commit()
+
+    assert consider_entry(session, token, early) is True
+    assert consider_entry(session, token, late) is False
+
+
+def test_a_token_too_old_for_the_early_arm_is_rejected(session):
+    from collector.paper import SNIPER_STRATEGIES
+
+    early, late = SNIPER_STRATEGIES
+    token = make_token(session)
+    at = TS + timedelta(seconds=400)          # ~7 minutes old
+    observe(session, token, at, 0.001, liquidity=500.0, buys=1)
+    can_sell(session, token, at)
+    session.commit()
+
+    assert consider_entry(session, token, early) is False
+    assert consider_entry(session, token, late) is True
+
+
+def test_min_age_defaults_to_zero_so_existing_strategies_are_unchanged():
+    from collector.paper import DEFAULT_STRATEGIES
+
+    assert all(s.min_age_s == 0.0 for s in DEFAULT_STRATEGIES)

@@ -41,6 +41,7 @@ class Strategy:
     name: str
 
     # ---- entry
+    min_age_s: float = 0.0               # wait at least this long before buying
     max_age_s: float = 600.0             # only tokens younger than this
     min_liquidity_usd: float = 5_000.0   # a pool too thin to exit is not a trade
     max_liquidity_usd: float = 2_000_000.0
@@ -93,6 +94,37 @@ DEFAULT_STRATEGIES = (
              min_buys_5m=3, take_profit_multiple=1.5, stop_loss_multiple=0.7,
              time_stop_s=900),
 )
+
+# ---------------------------------------------------- the sniping experiment
+#
+# A MATCHED PAIR. Every parameter is identical except WHEN they buy, so any
+# difference in outcome is attributable to entry timing and nothing else. That
+# is the whole point: a sniper bot's claimed edge is being early, and this is
+# the cheapest honest way to ask whether earliness is worth anything.
+#
+# What this CAN answer: does buying as soon as we can see a token beat buying
+# the same token five minutes later, after costs.
+#
+# What it CANNOT answer: whether block-zero sniping works. Our detection is
+# seconds behind the chain, and a real sniper competes in milliseconds. So this
+# tests earliness across SECONDS, not milliseconds. If earliness does not pay
+# across seconds, the case for chasing milliseconds gets much weaker -- but a
+# null result here is not proof that true sniping fails.
+_SNIPE_COMMON = dict(
+    min_liquidity_usd=0.0, min_buys_5m=0, take_profit_multiple=3.0,
+    stop_loss_multiple=0.5, time_stop_s=3600, notional_usd=100.0,
+)
+
+SNIPER_STRATEGIES = (
+    # Buys at the first observation we ever get. As close to sniping as our
+    # data allows.
+    Strategy(name="snipe_asap", min_age_s=0.0, max_age_s=90.0, **_SNIPE_COMMON),
+    # Same token, same rules, five minutes later.
+    Strategy(name="wait_5m", min_age_s=300.0, max_age_s=600.0, **_SNIPE_COMMON),
+)
+
+
+ALL_STRATEGIES = DEFAULT_STRATEGIES + SNIPER_STRATEGIES
 
 
 def latest_observation(session: Session, token_id: int) -> Observation | None:
@@ -191,7 +223,7 @@ def consider_entry(session: Session, token: Token, strategy: Strategy) -> bool:
         moment = moment.replace(tzinfo=UTC)
 
     age = _age_s(token, moment)
-    if age > strategy.max_age_s:
+    if age > strategy.max_age_s or age < strategy.min_age_s:
         return False
     liquidity = float(obs.liquidity_usd or 0.0)
     if not (strategy.min_liquidity_usd <= liquidity <= strategy.max_liquidity_usd):
@@ -315,7 +347,7 @@ def _close(position: PaperPosition, strategy: Strategy, price: float,
              gross - costs)
 
 
-def run_once(session: Session, strategies=DEFAULT_STRATEGIES,
+def run_once(session: Session, strategies=ALL_STRATEGIES,
              settings=None) -> dict[str, int]:  # noqa: ANN001
     """One sweep: manage open positions, then look for new entries."""
     counts = {"opened": 0, "closed": 0, "blocked": 0}
@@ -345,7 +377,7 @@ def run_once(session: Session, strategies=DEFAULT_STRATEGIES,
     return counts
 
 
-def summary(session: Session, strategies=DEFAULT_STRATEGIES) -> dict:
+def summary(session: Session, strategies=ALL_STRATEGIES) -> dict:
     """Running paper P&L per strategy. Honest about what is still unresolved."""
     out: dict[str, dict] = {}
     for strategy in strategies:
