@@ -340,7 +340,7 @@ class Collector:
         while not self.stop_event.is_set():
             try:
                 with self.Session() as session:
-                    counts = paper.run_once(session)
+                    counts = paper.run_once(session, settings=self.settings)
                 if any(counts.values()):
                     log.info("paper: %s", counts)
             except Exception as exc:  # noqa: BLE001

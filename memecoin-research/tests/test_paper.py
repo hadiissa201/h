@@ -326,3 +326,84 @@ def test_even_the_control_will_not_buy_something_unsellable(session):
     cannot_sell(session, token, at)
     session.commit()
     assert consider_entry(session, token, control) is False
+
+
+# ---------------------------------------------- bugs found in live running
+def test_the_staleness_bound_never_undercuts_the_simulation_cadence():
+    """A bound tighter than the sampling rate makes EVERY verdict stale.
+
+    That is not conservative, it is impossible -- and it looked like a finding:
+    44 of 44 open positions were permanently stuck, which reads as "the market
+    is unsellable" when it actually meant "we can never satisfy our own rule".
+    """
+    from collector.config import CollectorSettings
+    from collector.paper import verdict_age_budget
+    from collector.schedule import WorkKind, interval_for
+
+    settings = CollectorSettings()
+    for age in (60.0, 1800.0, 12_000.0, 60_000.0, 300_000.0):
+        budget = verdict_age_budget(settings, STRAT, age)
+        cadence = interval_for(settings, WorkKind.EXIT, age) or 0.0
+        assert budget >= cadence, f"age {age}: budget {budget} < cadence {cadence}"
+        assert budget >= STRAT.min_verdict_age_s
+
+
+def test_an_old_position_can_still_close(session):
+    """The deadlock, end to end: exits are simulated every 2h for a token this
+    old, so a 300s staleness bound could never be met."""
+    from collector.config import CollectorSettings
+
+    settings = CollectorSettings()
+    token = make_token(session)
+    position = open_position(session, token)
+
+    later = TS + timedelta(hours=8)
+    observe(session, token, later, 0.004)
+    can_sell(session, token, later - timedelta(minutes=20))   # last sim, 20m old
+    session.commit()
+
+    assert manage_position(session, position, STRAT, settings) == "take_profit"
+    assert position.is_open is False
+
+
+def test_a_long_position_cannot_lose_more_than_it_staked(session):
+    """A quote reported >100% impact and produced $3.5m of costs on $100."""
+    token = make_token(session)
+    position = open_position(session, token)
+    later = TS + timedelta(minutes=5)
+    observe(session, token, later, 0.0004)
+    can_sell(session, token, later, impact=35_000.0)   # absurd quoted impact
+    manage_position(session, position, STRAT)
+
+    assert float(position.net_pnl_usd) >= -float(position.notional_usd)
+    assert float(position.costs_usd) <= float(position.notional_usd) * 2
+
+
+def test_an_implausible_price_is_ignored_rather_than_booked(session):
+    """A 35,000x reading is a near-zero denominator, not a windfall.
+
+    The dangerous direction is optimistic: with a smaller quoted impact this
+    would have recorded a spectacular fake win.
+    """
+    token = make_token(session)
+    position = open_position(session, token, entry=0.001)
+    later = TS + timedelta(minutes=5)
+    observe(session, token, later, 35.0)        # x35,000
+    can_sell(session, token, later)
+
+    assert manage_position(session, position, STRAT) is None
+    assert position.is_open is True
+    assert position.net_pnl_usd is None
+    assert float(position.unrealisable_peak_multiple) == pytest.approx(1.0), \
+        "an implausible reading must not even set the peak"
+
+
+def test_a_large_but_credible_move_is_still_taken(session):
+    """The guard must not silently discard genuine winners."""
+    token = make_token(session)
+    position = open_position(session, token, entry=0.001)
+    later = TS + timedelta(minutes=5)
+    observe(session, token, later, 0.05)        # x50 -- big, but credible
+    can_sell(session, token, later)
+    assert manage_position(session, position, STRAT) == "take_profit"
+    assert float(position.net_pnl_usd) > 0

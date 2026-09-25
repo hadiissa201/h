@@ -52,9 +52,15 @@ class Strategy:
     take_profit_multiple: float = 3.0    # +200%
     stop_loss_multiple: float = 0.5      # -50%
     time_stop_s: float = 3600.0          # give up after an hour
-    # An exit verdict goes stale. Liquidity can be pulled in a single block, so
-    # a success from ten minutes ago is not permission to sell now.
-    max_verdict_age_s: float = 300.0
+    # An exit verdict goes stale: liquidity can be pulled in a single block, so
+    # an old success is weak evidence. But this floor cannot be tighter than the
+    # rate we actually simulate exits at, or every verdict is stale by
+    # construction and NO position can ever close. That happened: 44 of 44 open
+    # positions were permanently stuck because exits are simulated every 30-120
+    # minutes for older tokens while this was pinned at 300 seconds.
+    min_verdict_age_s: float = 300.0
+    # Multiple of the current tier's exit-simulation interval to tolerate.
+    verdict_age_cadence_multiple: float = 2.5
 
     # ---- costs, charged on both legs
     round_trip_cost_pct: float = 0.01    # priority fees + DEX fees + tips
@@ -93,6 +99,31 @@ def latest_observation(session: Session, token_id: int) -> Observation | None:
     return session.scalars(
         select(Observation).where(Observation.token_id == token_id)
         .order_by(Observation.observed_ts.desc()).limit(1)).first()
+
+
+# A price move beyond this within the tracked window is treated as a DATA
+# ERROR, not a windfall. A 35,000x observation came from a near-zero
+# denominator on a thin pool, and taking it at face value recorded a $3.5m
+# gross gain on a $100 position. The dangerous direction is the optimistic one:
+# with a smaller quoted impact that would have booked as an enormous fake win.
+IMPLAUSIBLE_MULTIPLE = 1_000.0
+
+
+def verdict_age_budget(settings, strategy: "Strategy", age_s: float) -> float:  # noqa: ANN001
+    """How old an exit verdict may be before it stops authorising a sale.
+
+    Derived from the cadence we actually simulate at, never tighter than it.
+    A bound below the sampling rate does not make the test conservative -- it
+    makes it impossible, which is a different thing and much worse, because it
+    looks like a finding.
+    """
+    from collector.schedule import WorkKind, interval_for
+
+    interval = interval_for(settings, WorkKind.EXIT, age_s)
+    if interval is None:
+        interval = 0.0
+    return max(strategy.min_verdict_age_s,
+               interval * strategy.verdict_age_cadence_multiple)
 
 
 def exit_available(session: Session, token_id: int, moment: datetime,
@@ -136,6 +167,13 @@ def _age_s(token: Token, moment: datetime) -> float:
     return (moment - detected).total_seconds()
 
 
+def _age_s_from_open(position: PaperPosition, moment: datetime) -> float:
+    opened = position.opened_ts
+    if opened.tzinfo is None:
+        opened = opened.replace(tzinfo=UTC)
+    return max(0.0, (moment - opened).total_seconds())
+
+
 def consider_entry(session: Session, token: Token, strategy: Strategy) -> bool:
     """Open a hypothetical position if the rules allow it right now."""
     existing = session.scalar(
@@ -162,7 +200,7 @@ def consider_entry(session: Session, token: Token, strategy: Strategy) -> bool:
         return False
     # Buying something we have never been able to sell is not a strategy.
     if strategy.require_proven_exit and exit_available(
-            session, token.id, moment, strategy.max_verdict_age_s) is None:
+            session, token.id, moment, strategy.min_verdict_age_s) is None:
         return False
 
     session.add(PaperPosition(
@@ -178,7 +216,7 @@ def consider_entry(session: Session, token: Token, strategy: Strategy) -> bool:
 
 
 def manage_position(session: Session, position: PaperPosition,
-                    strategy: Strategy) -> str | None:
+                    strategy: Strategy, settings=None) -> str | None:  # noqa: ANN001
     """Update a live position; close it only if an exit genuinely existed."""
     obs = latest_observation(session, position.token_id)
     if obs is None or not obs.price_usd or obs.price_usd <= 0:
@@ -191,14 +229,26 @@ def manage_position(session: Session, position: PaperPosition,
     entry = float(position.entry_price_usd)
     multiple = price / entry if entry else 0.0
 
+    # A move this large on a thin pool is a bad reading, not a windfall.
+    # Skipping the observation is the conservative choice: acting on it would
+    # book a spectacular fake gain, and ignoring it only delays a real one to
+    # the next observation.
+    if multiple > IMPLAUSIBLE_MULTIPLE or multiple < 0:
+        log.warning("paper[%s] ignoring implausible x%.1f on token %s "
+                    "(price %.12g vs entry %.12g) -- treated as a data error",
+                    strategy.name, multiple, position.token_id, price, entry)
+        return None
+
     # Track the peak both ways: what we could have taken, and what merely
     # appeared on a chart. The gap between them IS the cost of unsellability.
     if position.unrealisable_peak_multiple is None or \
             multiple > float(position.unrealisable_peak_multiple):
         position.unrealisable_peak_multiple = multiple
 
-    sellable = exit_available(session, position.token_id, moment,
-                              strategy.max_verdict_age_s)
+    age = _age_s_from_open(position, moment)
+    budget = (verdict_age_budget(settings, strategy, age) if settings is not None
+              else strategy.min_verdict_age_s)
+    sellable = exit_available(session, position.token_id, moment, budget)
     if sellable is not None and (position.peak_multiple is None
                                  or multiple > float(position.peak_multiple)):
         position.peak_multiple = multiple
@@ -239,8 +289,18 @@ def _close(position: PaperPosition, strategy: Strategy, price: float,
 
     # Both legs pay the flat cost; the exit leg also pays the measured price
     # impact for this size. On a thin pool that impact dwarfs the fee.
-    impact = abs(float(sellable.price_impact_pct or 0.0))
-    costs = notional * strategy.round_trip_cost_pct + (notional + gross) * impact
+    #
+    # Impact is clamped to 1.0: a quote can report an impact above 100%, which
+    # means "you get essentially nothing back", not "you owe more than you
+    # staked". Uncapped, a single such quote produced $3.5m of costs on a $100
+    # position and made every strategy's total meaningless.
+    impact = min(1.0, abs(float(sellable.price_impact_pct or 0.0)))
+    costs = notional * strategy.round_trip_cost_pct + max(0.0, notional + gross) * impact
+
+    # A long spot position cannot lose more than it staked. Whatever the
+    # arithmetic says, the floor is -notional.
+    if gross - costs < -notional:
+        costs = gross + notional
 
     position.is_open = False
     position.closed_ts = moment
@@ -255,7 +315,8 @@ def _close(position: PaperPosition, strategy: Strategy, price: float,
              gross - costs)
 
 
-def run_once(session: Session, strategies=DEFAULT_STRATEGIES) -> dict[str, int]:
+def run_once(session: Session, strategies=DEFAULT_STRATEGIES,
+             settings=None) -> dict[str, int]:  # noqa: ANN001
     """One sweep: manage open positions, then look for new entries."""
     counts = {"opened": 0, "closed": 0, "blocked": 0}
     by_name = {s.name: s for s in strategies}
@@ -266,7 +327,7 @@ def run_once(session: Session, strategies=DEFAULT_STRATEGIES) -> dict[str, int]:
         if strategy is None:
             continue
         before = position.blocked_exits or 0
-        if manage_position(session, position, strategy):
+        if manage_position(session, position, strategy, settings):
             counts["closed"] += 1
         elif (position.blocked_exits or 0) > before:
             counts["blocked"] += 1
