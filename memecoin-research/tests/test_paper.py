@@ -281,3 +281,48 @@ def test_a_fresh_unknown_overrides_an_older_success(session):
     unknown_sell(session, token, TS + timedelta(seconds=60))
     session.commit()
     assert exit_available(session, token.id, TS + timedelta(seconds=90)) is None
+
+
+# ------------------------------------------------------------------- control
+def test_the_control_strategy_buys_without_an_opinion(session):
+    """It exists so a filtered strategy has something to beat.
+
+    Without a control, any positive P&L reads as skill when it may just be the
+    base rate of the market during that window -- the same reason the trading
+    system reports cash and buy-and-hold baselines.
+    """
+    from collector.paper import DEFAULT_STRATEGIES
+
+    control = next(s for s in DEFAULT_STRATEGIES if s.name == "control_any")
+    assert control.min_liquidity_usd == 0.0
+    assert control.min_buys_5m == 0
+    # Still may not buy what was never sellable -- that is honesty, not a filter.
+    assert control.require_proven_exit is True
+
+
+def test_the_control_enters_a_token_the_filters_would_reject(session):
+    from collector.paper import DEFAULT_STRATEGIES
+
+    control = next(s for s in DEFAULT_STRATEGIES if s.name == "control_any")
+    filtered = next(s for s in DEFAULT_STRATEGIES if s.name == "patient_200")
+
+    token = make_token(session)
+    at = TS + timedelta(seconds=30)
+    observe(session, token, at, 0.001, liquidity=300.0, buys=1)  # thin and quiet
+    can_sell(session, token, at)
+    session.commit()
+
+    assert consider_entry(session, token, filtered) is False
+    assert consider_entry(session, token, control) is True
+
+
+def test_even_the_control_will_not_buy_something_unsellable(session):
+    from collector.paper import DEFAULT_STRATEGIES
+
+    control = next(s for s in DEFAULT_STRATEGIES if s.name == "control_any")
+    token = make_token(session)
+    at = TS + timedelta(seconds=30)
+    observe(session, token, at, 0.001, liquidity=300.0, buys=1)
+    cannot_sell(session, token, at)
+    session.commit()
+    assert consider_entry(session, token, control) is False

@@ -64,6 +64,22 @@ LAUNCHPAD_CANDIDATES = (
     ("meteora-dbc", "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN"),
 )
 
+# What the COLLECTOR subscribes to, which is not the same list.
+#
+# pumpswap-amm is excluded, on the probe's own numbers: it produced 152,219 of
+# ~240,000 messages -- 63% of the entire firehose -- for 37 create-like events,
+# and those are GRADUATIONS (a token migrating off a bonding curve), not new
+# launches. Paying 63% of a metered message budget for events that are not
+# launches starved detection: the collector saw 1.95 messages/second against the
+# probe's ~300, and 0.12 launches/minute against ~38.
+#
+# The probe still watches all four, because measuring graduation rate is useful
+# and a five-minute probe run is not metered the way a week of collection is.
+COLLECTOR_PROGRAMS = tuple(
+    (label, pid) for label, pid in LAUNCHPAD_CANDIDATES
+    if label != "pumpswap-amm"
+)
+
 # Token program IDs, used to tell a Token-2022 mint (transfer hooks, transfer
 # fees) from a classic SPL mint. Both are long-standing and stable.
 TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"

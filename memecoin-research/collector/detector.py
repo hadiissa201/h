@@ -28,7 +28,7 @@ from datetime import UTC, datetime
 
 import websockets
 
-from probe.constants import LAUNCHPAD_CANDIDATES
+from probe.constants import COLLECTOR_PROGRAMS
 from probe.report import redact
 
 log = logging.getLogger("collector.detector")
@@ -59,6 +59,7 @@ class Detection:
 
 @dataclass
 class DetectorStats:
+    started_at: float = field(default_factory=time.time)
     connected_since: float | None = None
     reconnects: int = 0
     messages: int = 0
@@ -70,8 +71,15 @@ class DetectorStats:
     seen_signatures: set[str] = field(default_factory=set)
 
     def snapshot(self) -> dict[str, object]:
+        elapsed = max(1e-9, time.time() - self.started_at)
         return {
             "connected": self.connected_since is not None,
+            # The number that exposes throttling. The probe measured ~300/s on
+            # the full firehose; a sustained rate far below that means the
+            # provider is metering us, not that the market went quiet.
+            "messages_per_s": round(self.messages / elapsed, 2),
+            "detections_per_min": round(self.detections / elapsed * 60, 3),
+            "subscriptions": len(COLLECTOR_PROGRAMS),
             "connected_for_s": (round(time.time() - self.connected_since, 1)
                                 if self.connected_since else 0),
             "reconnects": self.reconnects,
@@ -150,7 +158,7 @@ class LaunchDetector:
                                       ping_timeout=90, close_timeout=5,
                                       max_size=8_000_000) as ws:
             labels = {}
-            for index, (label, program_id) in enumerate(LAUNCHPAD_CANDIDATES):
+            for index, (label, program_id) in enumerate(COLLECTOR_PROGRAMS):
                 request_id = SUB_BASE + index
                 labels[request_id] = label
                 await ws.send(json.dumps({

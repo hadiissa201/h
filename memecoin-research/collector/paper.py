@@ -62,14 +62,30 @@ class Strategy:
 
 # Ordinary and unoptimised on purpose. Tuning these before the base rate is
 # known is how a curve gets fitted to noise.
+#
+# The thresholds were loosened once, after 8 hours produced ZERO positions: a
+# $5,000 liquidity floor excludes most tokens at the age these rules want to
+# buy them. That change widens the net to obtain a sample at all -- it is not
+# tuning for returns, and the distinction matters. Adjusting filters because
+# the P&L looks bad would be curve fitting; adjusting them because there is no
+# data to judge is just making the experiment runnable.
 DEFAULT_STRATEGIES = (
-    Strategy(name="early_200", max_age_s=600, min_liquidity_usd=5_000,
-             take_profit_multiple=3.0, stop_loss_multiple=0.5, time_stop_s=3600),
-    Strategy(name="patient_200", max_age_s=1800, min_liquidity_usd=20_000,
-             min_buys_5m=15, take_profit_multiple=3.0, stop_loss_multiple=0.5,
+    # THE CONTROL. Buys anything with a demonstrated exit and no other opinion.
+    # Every filtered strategy has to beat this, or its filters are decoration.
+    # Same role the cash and buy-and-hold baselines play in the trading system:
+    # without it, any positive number looks like skill.
+    Strategy(name="control_any", max_age_s=1800, min_liquidity_usd=0.0,
+             min_buys_5m=0, take_profit_multiple=3.0, stop_loss_multiple=0.5,
+             time_stop_s=3600),
+    Strategy(name="early_200", max_age_s=600, min_liquidity_usd=1_500,
+             min_buys_5m=3, take_profit_multiple=3.0, stop_loss_multiple=0.5,
+             time_stop_s=3600),
+    Strategy(name="patient_200", max_age_s=1800, min_liquidity_usd=10_000,
+             min_buys_5m=10, take_profit_multiple=3.0, stop_loss_multiple=0.5,
              time_stop_s=10800),
-    Strategy(name="quick_50", max_age_s=600, min_liquidity_usd=5_000,
-             take_profit_multiple=1.5, stop_loss_multiple=0.7, time_stop_s=900),
+    Strategy(name="quick_50", max_age_s=600, min_liquidity_usd=1_500,
+             min_buys_5m=3, take_profit_multiple=1.5, stop_loss_multiple=0.7,
+             time_stop_s=900),
 )
 
 
