@@ -49,6 +49,16 @@ class Strategy:
     require_proven_exit: bool = True     # a route must have existed BEFORE entry
     notional_usd: float = 100.0
 
+    # ---- structural filters: facts about the DEPLOYER, not the price.
+    # Everything above is on every screen in the market, which is consistent
+    # with what we measured -- the unfiltered control beat every filtered
+    # strategy. These are the only inputs that are not already public in the
+    # way liquidity is.
+    require_freeze_revoked: bool = False   # they cannot freeze your account
+    require_mint_revoked: bool = False     # they cannot print more supply
+    max_creator_death_rate: float | None = None   # None = do not look
+    min_creator_prior_tokens: int = 0      # history needed before judging
+
     # ---- exit
     take_profit_multiple: float = 3.0    # +200%
     stop_loss_multiple: float = 0.5      # -50%
@@ -124,7 +134,28 @@ SNIPER_STRATEGIES = (
 )
 
 
-ALL_STRATEGIES = DEFAULT_STRATEGIES + SNIPER_STRATEGIES
+# ------------------------------------------------ the structural experiment
+#
+# The genuinely untested hypothesis: that facts about the DEPLOYER predict
+# something the price does not. Each arm shares control_any's entry window and
+# exits, so the comparison against control_any isolates the structural filter.
+#
+# It has to beat a measured base rate of about -22%, which is a large hole.
+# These make the question answerable; they do not make it likely.
+STRUCTURAL_STRATEGIES = (
+    # Cannot freeze your account, cannot print more supply.
+    Strategy(name="safe_authorities", max_age_s=1800, min_liquidity_usd=0.0,
+             min_buys_5m=0, take_profit_multiple=3.0, stop_loss_multiple=0.5,
+             time_stop_s=3600, require_freeze_revoked=True,
+             require_mint_revoked=True),
+    # Deployer has launched before and most of those tokens are not dead.
+    Strategy(name="clean_deployer", max_age_s=1800, min_liquidity_usd=0.0,
+             min_buys_5m=0, take_profit_multiple=3.0, stop_loss_multiple=0.5,
+             time_stop_s=3600, max_creator_death_rate=0.5,
+             min_creator_prior_tokens=2),
+)
+
+ALL_STRATEGIES = DEFAULT_STRATEGIES + SNIPER_STRATEGIES + STRUCTURAL_STRATEGIES
 
 
 def latest_observation(session: Session, token_id: int) -> Observation | None:
@@ -235,6 +266,9 @@ def consider_entry(session: Session, token: Token, strategy: Strategy) -> bool:
             session, token.id, moment, strategy.min_verdict_age_s) is None:
         return False
 
+    if not _structural_ok(session, token, strategy):
+        return False
+
     session.add(PaperPosition(
         token_id=token.id, strategy=strategy.name, opened_ts=moment,
         entry_price_usd=float(obs.price_usd), notional_usd=strategy.notional_usd,
@@ -245,6 +279,40 @@ def consider_entry(session: Session, token: Token, strategy: Strategy) -> bool:
     log.info("paper[%s] OPEN %s @ %.10f (age %.0fs, liq $%.0f)",
              strategy.name, token.address[:12], float(obs.price_usd), age, liquidity)
     return True
+
+
+def _structural_ok(session: Session, token: Token, strategy: Strategy) -> bool:
+    """Apply the deployer-based filters, if this strategy uses any.
+
+    Unknown is NOT treated as clean. A token whose authorities we failed to
+    read is skipped by a strategy that requires them revoked -- scoring a
+    missing fact as a pass would quietly let through exactly the tokens we
+    could not check.
+    """
+    if strategy.require_freeze_revoked and token.freeze_authority is not None:
+        return False
+    if strategy.require_mint_revoked and token.mint_authority is not None:
+        return False
+    if strategy.require_freeze_revoked and token.freeze_authority is None \
+            and token.creator_address is None:
+        # Nothing was read at all; we cannot claim the authority is revoked.
+        return False
+
+    if strategy.max_creator_death_rate is None:
+        return True
+    if not token.creator_address:
+        return False
+
+    from collector.enrich import creator_history
+
+    history = creator_history(session, token.chain, token.creator_address,
+                              before_token_id=token.id)
+    if history.prior_tokens < strategy.min_creator_prior_tokens:
+        # Not enough history to judge. A first-time deployer is unknown, not
+        # innocent, and this strategy is specifically about known behaviour.
+        return False
+    rate = history.death_rate
+    return rate is not None and rate <= strategy.max_creator_death_rate
 
 
 def manage_position(session: Session, position: PaperPosition,

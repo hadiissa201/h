@@ -466,3 +466,117 @@ def test_min_age_defaults_to_zero_so_existing_strategies_are_unchanged():
     from collector.paper import DEFAULT_STRATEGIES
 
     assert all(s.min_age_s == 0.0 for s in DEFAULT_STRATEGIES)
+
+
+# -------------------------------------------- the structural experiment
+def test_a_live_freeze_authority_is_rejected(session):
+    """A live freeze authority means they can stop YOU from selling."""
+    from collector.paper import STRUCTURAL_STRATEGIES
+
+    safe = next(s for s in STRUCTURAL_STRATEGIES if s.name == "safe_authorities")
+    token = make_token(session)
+    token.freeze_authority = "SomeAuthorityAddress"
+    token.mint_authority = None
+    token.creator_address = "Deployer1"
+    at = TS + timedelta(seconds=30)
+    observe(session, token, at, 0.001)
+    can_sell(session, token, at)
+    session.commit()
+    assert consider_entry(session, token, safe) is False
+
+
+def test_revoked_authorities_pass(session):
+    from collector.paper import STRUCTURAL_STRATEGIES
+
+    safe = next(s for s in STRUCTURAL_STRATEGIES if s.name == "safe_authorities")
+    token = make_token(session)
+    token.freeze_authority = None
+    token.mint_authority = None
+    token.creator_address = "Deployer1"
+    at = TS + timedelta(seconds=30)
+    observe(session, token, at, 0.001)
+    can_sell(session, token, at)
+    session.commit()
+    assert consider_entry(session, token, safe) is True
+
+
+def test_an_unread_token_is_not_treated_as_safe(session):
+    """Unknown must never score as clean.
+
+    Passing a token whose authorities we failed to read would quietly admit
+    exactly the ones we could not check.
+    """
+    from collector.paper import STRUCTURAL_STRATEGIES
+
+    safe = next(s for s in STRUCTURAL_STRATEGIES if s.name == "safe_authorities")
+    token = make_token(session)           # nothing enriched: all NULL
+    at = TS + timedelta(seconds=30)
+    observe(session, token, at, 0.001)
+    can_sell(session, token, at)
+    session.commit()
+    assert consider_entry(session, token, safe) is False
+
+
+def test_a_first_time_deployer_is_unknown_not_innocent(session):
+    from collector.paper import STRUCTURAL_STRATEGIES
+
+    clean = next(s for s in STRUCTURAL_STRATEGIES if s.name == "clean_deployer")
+    token = make_token(session)
+    token.creator_address = "BrandNewWallet"
+    at = TS + timedelta(seconds=30)
+    observe(session, token, at, 0.001)
+    can_sell(session, token, at)
+    session.commit()
+    assert consider_entry(session, token, clean) is False
+
+
+def test_creator_history_excludes_the_token_being_judged(session):
+    """Counting the current token's own fate would be look-ahead of the worst
+    kind: the filter would 'predict' a rug using the rug it is predicting."""
+    from collector.enrich import creator_history
+    from collector.models import TokenStatus
+    from poc.store import upsert_token
+
+    ids = []
+    for i in range(3):
+        tid = upsert_token(session, chain="solana", address=f"TOK{i}",
+                           detected_ts=TS, detection_source="ws")
+        token = session.get(Token, tid)
+        token.creator_address = "SerialDeployer"
+        session.add(TokenStatus(token_id=tid, retired_ts=TS))   # all died
+        ids.append(tid)
+    session.commit()
+
+    from collector.enrich import record_creator
+    for _ in range(3):
+        record_creator(session, "solana", "SerialDeployer")
+    session.commit()
+
+    # Judging the LAST token sees only the two before it.
+    history = creator_history(session, "solana", "SerialDeployer",
+                              before_token_id=ids[-1])
+    assert history.prior_tokens == 2
+    assert history.prior_dead == 2
+    assert history.death_rate == pytest.approx(1.0)
+
+
+def test_no_history_gives_none_not_zero():
+    """None is not a clean record. Scoring it as 0.0 would pass every new
+    deployer through a filter designed to catch known behaviour."""
+    from collector.enrich import CreatorHistory
+
+    assert CreatorHistory(address="X").death_rate is None
+    assert CreatorHistory(address="X", prior_tokens=4, prior_dead=1).death_rate == 0.25
+
+
+def test_the_structural_arms_match_the_control_except_for_the_filter():
+    """So a difference is attributable to the structural fact, not the window."""
+    from collector.paper import DEFAULT_STRATEGIES, STRUCTURAL_STRATEGIES
+
+    control = next(s for s in DEFAULT_STRATEGIES if s.name == "control_any")
+    for arm in STRUCTURAL_STRATEGIES:
+        assert arm.max_age_s == control.max_age_s
+        assert arm.min_liquidity_usd == control.min_liquidity_usd
+        assert arm.take_profit_multiple == control.take_profit_multiple
+        assert arm.stop_loss_multiple == control.stop_loss_multiple
+        assert arm.time_stop_s == control.time_stop_s

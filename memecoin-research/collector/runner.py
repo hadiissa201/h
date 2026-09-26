@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from collector.config import CollectorSettings
 from collector.detector import Detection, LaunchDetector
-from collector import paper
+from collector import enrich, paper
 from collector.models import (
     Base,
     CollectorRun,
@@ -220,6 +220,17 @@ class Collector:
             sample_rate_at_detection=self.settings.sample_rate,
             is_tracked=True,
         )
+        # Structural facts, read once at admission: who deployed it, and
+        # whether they can still mint or freeze. This is the only information
+        # we collect that is NOT already on every screen in the market.
+        token = session.get(Token, token_id)
+        if token is not None:
+            try:
+                enrich.enrich_token(session, self._client, self.settings.rpc_url,
+                                    token, pending.signature)
+            except Exception as exc:  # noqa: BLE001 -- enrichment is a bonus
+                log.debug("enrichment failed for %s: %s", mint, exc)
+
         insert_event(session, token_id=token_id, event_ts=pending.detected_ts,
                      kind="first_seen",
                      detail={"program": pending.program_label,
@@ -370,6 +381,15 @@ class Collector:
                     select(func.count()).select_from(PendingDetection)
                     .where(PendingDetection.resolved.is_(False),
                            PendingDetection.give_up_reason.is_(None))),
+                "tokens_with_creator": session.scalar(
+                    select(func.count()).select_from(Token)
+                    .where(Token.creator_address.is_not(None))),
+                "tokens_freeze_authority_live": session.scalar(
+                    select(func.count()).select_from(Token)
+                    .where(Token.freeze_authority.is_not(None))),
+                "tokens_mint_authority_live": session.scalar(
+                    select(func.count()).select_from(Token)
+                    .where(Token.mint_authority.is_not(None))),
                 "detections_given_up": session.scalar(
                     select(func.count()).select_from(PendingDetection)
                     .where(PendingDetection.give_up_reason.is_not(None))),
