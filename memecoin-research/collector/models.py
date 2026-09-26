@@ -432,6 +432,11 @@ class PaperPosition(Base):
     net_pnl_usd: Mapped[float | None] = mapped_column(Money)
     price_impact_at_exit_pct: Mapped[float | None] = mapped_column(Numeric(20, 10))
     blocked_exits: Mapped[int] = mapped_column(Integer, default=0)
+    # Split by cause. Only blocked_no_route is evidence about the market;
+    # blocked_our_fault is our sampling rate and our rate limits, and counting
+    # the two together would overstate how unsellable this market is.
+    blocked_no_route: Mapped[int] = mapped_column(Integer, default=0)
+    blocked_our_fault: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class CollectorRun(Base):

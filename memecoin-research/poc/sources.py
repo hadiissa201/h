@@ -66,6 +66,26 @@ FAILURE_TRANSPORT = "transport"
 FAILURE_BUILD = "build_failed"
 FAILURE_REVERTED = "reverted"
 FAILURE_UNPARSEABLE = "unparseable"
+FAILURE_BAD_REQUEST = "bad_request"
+
+# Jupiter says "there is genuinely no way to sell this" with one of these.
+# Anything else non-200 is OUR problem -- a malformed amount, a rate limit, an
+# outage -- and must never be recorded as a fact about the token. A 400 Bad
+# Request was being parsed as "no route", which turned every bad request we
+# sent into evidence that a token was unsellable.
+_NO_ROUTE_MARKERS = (
+    "could_not_find_any_route", "could not find any route",
+    "no_routes_found", "no routes found", "no route found",
+    "routenotfound", "no_route",
+)
+
+
+def says_no_route(body: str | None) -> bool:
+    """True only when the response explicitly reports a routing failure."""
+    if not body:
+        return False
+    lowered = body.lower()
+    return any(marker in lowered for marker in _NO_ROUTE_MARKERS)
 
 
 @dataclass

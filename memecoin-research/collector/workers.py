@@ -26,10 +26,12 @@ from sqlalchemy.orm import Session
 from collector.models import HolderSnapshot, Token, TokenStatus
 from collector.ratelimit import Limiters
 from poc.sources import (
+    FAILURE_BAD_REQUEST,
     FAILURE_TRANSPORT,
     ExitSimulation,
     fetch_dexscreener,
     parse_jupiter_quote,
+    says_no_route,
 )
 from poc.store import (
     insert_event,
@@ -198,10 +200,18 @@ def simulate_exit(session: Session, client: httpx.Client, limiters: Limiters,
                               timeout=settings.http_timeout_s)
             _note_429(limiters, "jupiter", resp.status_code)
             sim = parse_jupiter_quote(resp.text, notional)
-            if resp.status_code in (403, 429) or resp.status_code >= 500:
+            if resp.status_code != 200 and not says_no_route(resp.text):
+                # Non-200 without an explicit routing failure is OUR problem:
+                # a malformed amount, a rate limit, an outage. Recording it as
+                # "cannot be sold" would turn our own bad requests into
+                # evidence about the market, which is exactly what a 400 Bad
+                # Request was doing.
+                kind = (FAILURE_TRANSPORT if resp.status_code in (403, 429)
+                        or resp.status_code >= 500 else FAILURE_BAD_REQUEST)
                 sim = ExitSimulation("quote", notional, None,
-                                     failure_kind=FAILURE_TRANSPORT,
-                                     failure_reason=f"HTTP {resp.status_code}")
+                                     failure_kind=kind,
+                                     failure_reason=f"HTTP {resp.status_code}: "
+                                                    f"{resp.text[:160]}")
             body, status = resp.text, resp.status_code
         except Exception as exc:  # noqa: BLE001
             sim = ExitSimulation("quote", notional, None,
@@ -258,21 +268,35 @@ def _record_tradability(session: Session, token: Token, sim: ExitSimulation,
                              "reason": (sim.failure_reason or "")[:300]})
 
 
+# Jupiter rejects amounts outside a sane range with a 400. Those rejections
+# were being recorded as "no route", so the bounds are not cosmetic.
+_MIN_QUOTE_AMOUNT = 1_000
+_MAX_QUOTE_AMOUNT = 10 ** 18
+
+
 def _amount_for_notional(session: Session, token: Token, notional_usd: float) -> int:
     """Raw token units approximating a dollar notional at the last known price.
 
     Falls back to one whole token when no price is known yet. The notional is
     stored alongside the result either way, so Phase 2 always knows what size
     produced a given price impact -- impact without size is meaningless.
+
+    Clamped: a memecoin priced at 1e-11 turns $100 into an astronomically large
+    raw amount, and a near-zero one into a value below Jupiter's minimum. Both
+    return 400, and a 400 used to be filed as "this cannot be sold".
     """
     decimals = token.decimals if token.decimals is not None else 6
     status = session.get(TokenStatus, token.id)
     price = None
-    if status is not None and status.peak_price_usd is not None:
-        price = float(status.first_price_usd or status.peak_price_usd)
+    if status is not None and status.first_price_usd is not None:
+        price = float(status.first_price_usd)
+    elif status is not None and status.peak_price_usd is not None:
+        price = float(status.peak_price_usd)
     if not price or price <= 0:
-        return int(10 ** decimals)
-    return max(1, int((notional_usd / price) * (10 ** decimals)))
+        raw = 10 ** decimals
+    else:
+        raw = int((notional_usd / price) * (10 ** decimals))
+    return max(_MIN_QUOTE_AMOUNT, min(_MAX_QUOTE_AMOUNT, raw))
 
 
 # ------------------------------------------------------------------- holders

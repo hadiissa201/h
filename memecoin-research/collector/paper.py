@@ -189,6 +189,39 @@ def verdict_age_budget(settings, strategy: "Strategy", age_s: float) -> float:  
                interval * strategy.verdict_age_cadence_multiple)
 
 
+def exit_reason_unavailable(session: Session, token_id: int, moment: datetime,
+                            max_age_s: float) -> str:
+    """WHY we cannot sell. Three answers, and conflating them is a false finding.
+
+    'no_route'  -- we asked and the market said there is no way out. A fact.
+    'stale'     -- the last verdict was a success but too old to rely on. Our
+                   sampling rate, not the market's liquidity.
+    'unknown'   -- our request failed. Says nothing about the token.
+    'available' -- an exit existed.
+
+    Reporting 'stale' and 'unknown' alongside 'no_route' would overstate how
+    unsellable this market is, and the throttling we are currently under makes
+    both much more common.
+    """
+    row = session.scalars(
+        select(SimulatedExit)
+        .where(SimulatedExit.token_id == token_id,
+               SimulatedExit.simulated_ts <= moment)
+        .order_by(SimulatedExit.simulated_ts.desc()).limit(1)).first()
+    if row is None:
+        return "unknown"
+    if row.succeeded is None:
+        return "unknown"
+    if not row.succeeded:
+        return "no_route"
+    simulated = row.simulated_ts
+    if simulated.tzinfo is None:
+        simulated = simulated.replace(tzinfo=UTC)
+    if (moment - simulated).total_seconds() > max_age_s:
+        return "stale"
+    return "available"
+
+
 def exit_available(session: Session, token_id: int, moment: datetime,
                    max_age_s: float = 300.0) -> SimulatedExit | None:
     """Could this position have been sold at `moment`? Conservative by design.
@@ -370,11 +403,19 @@ def manage_position(session: Session, position: PaperPosition,
         return None
 
     if sellable is None:
-        # The rule fired but there was no way out. This is the finding, not an
-        # inconvenience: the position stays open and keeps trying.
+        # The rule fired but we could not act. WHY matters: only 'no_route' is
+        # a fact about the market. 'stale' and 'unknown' are facts about us.
+        why = exit_reason_unavailable(session, position.token_id, moment, budget)
         position.blocked_exits = (position.blocked_exits or 0) + 1
-        log.info("paper[%s] BLOCKED %s wanted %s at x%.2f -- no exit route",
-                 strategy.name, position.token_id, reason, multiple)
+        if why == "no_route":
+            position.blocked_no_route = (position.blocked_no_route or 0) + 1
+        else:
+            position.blocked_our_fault = (position.blocked_our_fault or 0) + 1
+        log.info("paper[%s] BLOCKED %s wanted %s at x%.2f -- %s",
+                 strategy.name, position.token_id, reason, multiple,
+                 {"no_route": "NO EXIT ROUTE (market)",
+                  "stale": "verdict too old (our sampling rate)",
+                  "unknown": "could not check (our request failed)"}[why])
         return None
 
     _close(position, strategy, price, moment, reason, sellable)
@@ -458,6 +499,11 @@ def summary(session: Session, strategies=ALL_STRATEGIES) -> dict:
         wins = [r for r in closed if float(r.net_pnl_usd or 0.0) > 0]
         deployed = sum(float(r.notional_usd) for r in closed) or 1.0
         stuck = [r for r in open_rows if (r.blocked_exits or 0) > 0]
+        # Split the stuck ones by cause, so "this market is unsellable" is never
+        # claimed on the back of our own throttling.
+        stuck_market = [r for r in stuck if (r.blocked_no_route or 0) > 0]
+        stuck_ours = [r for r in stuck if (r.blocked_no_route or 0) == 0
+                      and (r.blocked_our_fault or 0) > 0]
         out[strategy.name] = {
             "positions_opened": len(rows),
             "closed": len(closed),
@@ -465,6 +511,8 @@ def summary(session: Session, strategies=ALL_STRATEGIES) -> dict:
             # Positions the rules wanted to exit but could not. Real money would
             # still be in these, and they are NOT counted as profit.
             "stuck_no_exit": len(stuck),
+            "stuck_market_no_route": len(stuck_market),
+            "stuck_our_fault": len(stuck_ours),
             "wins": len(wins),
             "win_rate": round(len(wins) / len(closed), 4) if closed else None,
             "net_pnl_usd": round(net, 2),

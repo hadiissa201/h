@@ -7,6 +7,8 @@ at. That single shortcut turns an unsellable rug into a clean +200% win.
 
 from __future__ import annotations
 
+import itertools
+
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -38,8 +40,15 @@ def session():
         yield s
 
 
-def make_token(session, detected=TS) -> Token:
-    token_id = upsert_token(session, chain="solana", address="MINTAAA",
+_MINT_SEQ = itertools.count()
+
+
+def make_token(session, detected=TS, address=None) -> Token:
+    # Distinct addresses by default: upsert_token returns the EXISTING row for a
+    # repeated address, so a shared one silently makes two "different" tokens
+    # the same token and quietly breaks any test comparing them.
+    address = address or f"MINT{next(_MINT_SEQ):04d}"
+    token_id = upsert_token(session, chain="solana", address=address,
                             detected_ts=detected, detection_source="ws")
     session.commit()
     return session.get(Token, token_id)
@@ -580,3 +589,87 @@ def test_the_structural_arms_match_the_control_except_for_the_filter():
         assert arm.take_profit_multiple == control.take_profit_multiple
         assert arm.stop_loss_multiple == control.stop_loss_multiple
         assert arm.time_stop_s == control.time_stop_s
+
+
+# ------------------------------------ separating market facts from our faults
+def test_a_bad_request_is_not_evidence_that_a_token_cannot_be_sold():
+    """HTTP 400 was being parsed as 'no route'.
+
+    That turned every malformed quote WE sent into a data point claiming the
+    market was unsellable -- contaminating the single most important number in
+    this project.
+    """
+    from poc.sources import says_no_route
+
+    assert says_no_route('{"errorCode":"COULD_NOT_FIND_ANY_ROUTE"}') is True
+    assert says_no_route('{"error":"No routes found"}') is True
+    # A generic bad request says nothing about routing.
+    assert says_no_route('{"error":"Invalid amount"}') is False
+    assert says_no_route("Bad Request") is False
+    assert says_no_route(None) is False
+
+
+def test_the_three_causes_of_a_blocked_exit_are_distinguished(session):
+    """Only one of them is a fact about the market."""
+    from collector.paper import exit_reason_unavailable
+
+    token = make_token(session)
+    assert exit_reason_unavailable(session, token.id, TS, 300.0) == "unknown"
+
+    cannot_sell(session, token, TS)
+    session.commit()
+    assert exit_reason_unavailable(session, token.id, TS + timedelta(seconds=10),
+                                   300.0) == "no_route"
+
+    token2 = make_token(session)
+    can_sell(session, token2, TS)
+    session.commit()
+    assert exit_reason_unavailable(session, token2.id, TS + timedelta(seconds=10),
+                                   300.0) == "available"
+    # Same success, consulted much later: our sampling rate, not the market.
+    assert exit_reason_unavailable(session, token2.id, TS + timedelta(hours=2),
+                                   300.0) == "stale"
+
+
+def test_an_unknown_verdict_is_not_counted_as_market_evidence(session):
+    """Our rate limit must not appear in the unsellable statistic."""
+    from collector.paper import exit_reason_unavailable
+
+    token = make_token(session)
+    unknown_sell(session, token, TS)
+    session.commit()
+    assert exit_reason_unavailable(session, token.id, TS + timedelta(seconds=10),
+                                   300.0) == "unknown"
+
+
+def test_a_blocked_position_records_which_side_was_at_fault(session):
+    token = make_token(session)
+    position = open_position(session, token)
+    later = TS + timedelta(minutes=5)
+    observe(session, token, later, 0.004)
+    cannot_sell(session, token, later)          # the market says no
+    manage_position(session, position, STRAT)
+
+    assert position.blocked_no_route == 1
+    assert position.blocked_our_fault == 0
+
+
+def test_a_stale_block_is_charged_to_us_not_the_market(session):
+    """The gap must exceed the cadence-derived budget, which is generous:
+    exits are simulated every 12h for a token this old, so the tolerance is
+    ~30h. Anything shorter is legitimately NOT stale."""
+    from collector.config import CollectorSettings
+    from collector.paper import verdict_age_budget
+
+    settings = CollectorSettings()
+    token = make_token(session)
+    position = open_position(session, token)
+
+    budget = verdict_age_budget(settings, STRAT, 200_000.0)
+    later = TS + timedelta(seconds=budget * 1.5 + 3600)
+    observe(session, token, later, 0.004)     # take-profit territory
+    session.commit()
+    manage_position(session, position, STRAT, settings)
+
+    assert position.blocked_no_route == 0, "the market never said no"
+    assert position.blocked_our_fault == 1
