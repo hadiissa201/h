@@ -673,3 +673,84 @@ def test_a_stale_block_is_charged_to_us_not_the_market(session):
 
     assert position.blocked_no_route == 0, "the market never said no"
     assert position.blocked_our_fault == 1
+
+
+# ---------------------------------------------------- audit: cost accounting
+def test_both_legs_pay_price_impact(session):
+    """Buying $100 of a thin pool moves the price just as selling does.
+
+    Charging only the exit understated costs on every trade -- an optimistic
+    bias in exactly the direction that makes a losing idea look viable.
+    """
+    token = make_token(session)
+    at = TS + timedelta(seconds=30)
+    observe(session, token, at, 0.001)
+    can_sell(session, token, at, impact=0.10)      # 10% impact, both ways
+    session.commit()
+    consider_entry(session, token, STRAT)
+    session.commit()
+    position = session.scalar(select(PaperPosition))
+    assert float(position.entry_price_impact_pct) == pytest.approx(0.10)
+
+    later = TS + timedelta(minutes=5)
+    observe(session, token, later, 0.004)
+    can_sell(session, token, later, impact=0.10)
+    manage_position(session, position, STRAT)
+
+    fees = 100.0 * STRAT.round_trip_cost_pct
+    entry_leg = 100.0 * 0.10
+    exit_leg = (100.0 + float(position.gross_pnl_usd)) * 0.10
+    assert float(position.costs_gross_usd) == pytest.approx(
+        fees + entry_leg + exit_leg, rel=1e-6)
+    assert float(position.costs_gross_usd) > fees + exit_leg, \
+        "the entry leg must add to the total"
+
+
+def test_the_loss_floor_caps_what_is_charged_without_rewriting_actual_costs(session):
+    """The floor used to overwrite costs_usd, so a position that lost
+    everything reported tiny costs and the totals became meaningless."""
+    token = make_token(session)
+    at = TS + timedelta(seconds=30)
+    observe(session, token, at, 0.001)
+    can_sell(session, token, at, impact=0.5)
+    session.commit()
+    consider_entry(session, token, STRAT)
+    session.commit()
+    position = session.scalar(select(PaperPosition))
+
+    later = TS + timedelta(minutes=5)
+    observe(session, token, later, 0.0000001)      # collapsed
+    can_sell(session, token, later, impact=0.9)
+    manage_position(session, position, STRAT)
+
+    assert float(position.net_pnl_usd) == pytest.approx(-100.0, abs=0.01), \
+        "cannot lose more than the stake"
+    assert position.costs_capped_by_floor is True
+    assert float(position.costs_gross_usd) > float(position.costs_usd), \
+        "the actual costs must survive the cap"
+
+
+def test_net_always_reconciles_with_gross_minus_charged_costs(session):
+    for i, (exit_price, impact) in enumerate(
+            [(0.004, 0.02), (0.0004, 0.10), (0.001, 0.0), (0.00001, 0.8)]):
+        token = make_token(session)
+        at = TS + timedelta(seconds=30)
+        observe(session, token, at, 0.001)
+        can_sell(session, token, at, impact=impact)
+        session.commit()
+        consider_entry(session, token, STRAT)
+        session.commit()
+        position = session.scalars(
+            select(PaperPosition).order_by(PaperPosition.id.desc()).limit(1)).first()
+
+        later = TS + timedelta(minutes=5)
+        observe(session, token, later, exit_price)
+        can_sell(session, token, later, impact=impact)
+        manage_position(session, position, STRAT)
+        if position.exit_reason is None:
+            continue
+        gross = float(position.gross_pnl_usd)
+        charged = float(position.costs_usd)
+        assert float(position.net_pnl_usd) == pytest.approx(gross - charged, abs=0.01), \
+            f"case {i}: net must equal gross - charged costs"
+        assert float(position.net_pnl_usd) >= -float(position.notional_usd) - 0.01

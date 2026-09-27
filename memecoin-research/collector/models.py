@@ -427,8 +427,18 @@ class PaperPosition(Base):
     # rather than assumed away.
     unrealisable_peak_multiple: Mapped[float | None] = mapped_column(Numeric(20, 6))
 
+    # Price impact paid getting IN. Buying $100 of a thin pool moves the price
+    # too, and charging only the exit leg understated costs on every trade.
+    entry_price_impact_pct: Mapped[float | None] = mapped_column(Numeric(20, 10))
+
     gross_pnl_usd: Mapped[float | None] = mapped_column(Money)
+    # costs_usd is what was CHARGED, which the -notional floor can cap.
+    # costs_gross_usd is what the fees and impact actually came to. Without
+    # both, a position that lost everything reports tiny costs -- because the
+    # floor rewrote the field -- and the totals become nonsense.
+    costs_gross_usd: Mapped[float | None] = mapped_column(Money)
     costs_usd: Mapped[float | None] = mapped_column(Money)
+    costs_capped_by_floor: Mapped[bool] = mapped_column(Boolean, default=False)
     net_pnl_usd: Mapped[float | None] = mapped_column(Money)
     price_impact_at_exit_pct: Mapped[float | None] = mapped_column(Numeric(20, 10))
     blocked_exits: Mapped[int] = mapped_column(Integer, default=0)

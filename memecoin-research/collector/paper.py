@@ -302,10 +302,17 @@ def consider_entry(session: Session, token: Token, strategy: Strategy) -> bool:
     if not _structural_ok(session, token, strategy):
         return False
 
+    # The proven exit quote at entry is our best estimate of what BUYING this
+    # size costs in impact. Symmetric and conservative: it is the same pool.
+    proven = exit_available(session, token.id, moment, strategy.min_verdict_age_s)
+    entry_impact = (min(1.0, abs(float(proven.price_impact_pct or 0.0)))
+                    if proven is not None else 0.0)
+
     session.add(PaperPosition(
         token_id=token.id, strategy=strategy.name, opened_ts=moment,
         entry_price_usd=float(obs.price_usd), notional_usd=strategy.notional_usd,
         entry_liquidity_usd=liquidity, token_age_at_entry_s=age,
+        entry_price_impact_pct=entry_impact,
         peak_price_usd=float(obs.price_usd), peak_multiple=1.0,
         unrealisable_peak_multiple=1.0, is_open=True, blocked_exits=0,
     ))
@@ -435,22 +442,35 @@ def _close(position: PaperPosition, strategy: Strategy, price: float,
     # means "you get essentially nothing back", not "you owe more than you
     # staked". Uncapped, a single such quote produced $3.5m of costs on a $100
     # position and made every strategy's total meaningless.
-    impact = min(1.0, abs(float(sellable.price_impact_pct or 0.0)))
-    costs = notional * strategy.round_trip_cost_pct + max(0.0, notional + gross) * impact
+    exit_impact = min(1.0, abs(float(sellable.price_impact_pct or 0.0)))
+    # BOTH legs pay impact. Charging only the exit understated costs on every
+    # trade: buying $100 of a thin pool moves the price just as selling does.
+    entry_impact = min(1.0, abs(float(position.entry_price_impact_pct or 0.0)))
 
-    # A long spot position cannot lose more than it staked. Whatever the
-    # arithmetic says, the floor is -notional.
+    fees = notional * strategy.round_trip_cost_pct
+    costs_gross = (fees
+                   + notional * entry_impact
+                   + max(0.0, notional + gross) * exit_impact)
+
+    # A long spot position cannot lose more than it staked. The floor caps what
+    # can be CHARGED; costs_gross keeps what the costs actually were, so the
+    # totals stay meaningful instead of being rewritten to fit the floor.
+    costs = costs_gross
+    capped = False
     if gross - costs < -notional:
         costs = gross + notional
+        capped = True
 
     position.is_open = False
     position.closed_ts = moment
     position.exit_price_usd = price
     position.exit_reason = reason
     position.gross_pnl_usd = gross
+    position.costs_gross_usd = costs_gross
     position.costs_usd = costs
+    position.costs_capped_by_floor = capped
     position.net_pnl_usd = gross - costs
-    position.price_impact_at_exit_pct = impact
+    position.price_impact_at_exit_pct = exit_impact
     log.info("paper[%s] CLOSE %s %s x%.2f net $%+.2f",
              strategy.name, position.token_id, reason, price / entry if entry else 0,
              gross - costs)
@@ -517,7 +537,15 @@ def summary(session: Session, strategies=ALL_STRATEGIES) -> dict:
             "win_rate": round(len(wins) / len(closed), 4) if closed else None,
             "net_pnl_usd": round(net, 2),
             "return_on_deployed_pct": round(net / deployed * 100, 3) if closed else None,
-            "total_costs_usd": round(
+            # Charged (floor-capped) and actual, because a position that lost
+            # everything has its charged costs rewritten by the floor.
+            "total_costs_charged_usd": round(
                 sum(float(r.costs_usd or 0.0) for r in closed), 2),
+            "total_costs_gross_usd": round(
+                sum(float(r.costs_gross_usd or r.costs_usd or 0.0)
+                    for r in closed), 2),
+            "positions_capped_by_floor": sum(
+                1 for r in closed if r.costs_capped_by_floor),
+            "total_notional_deployed_usd": round(deployed, 2),
         }
     return out
