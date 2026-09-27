@@ -202,10 +202,9 @@ transaction fixtures; it is not yet proven against live LaunchLab launches. Re-r
 the per-launchpad abandonment table in a few hours. If LaunchLab has not fallen
 from 51.8% towards pump.fun's 17.7%, there is a second cause I have not found.
 
-**3. Wire in RPC simulation.** `simulate_sell_rpc` exists and has never been
-called. Until it is, "sellable" means "routable", and the specific failure this
-project exists to detect — a token you can quote but cannot exit — is outside
-what we measure.
+**3. Wire in RPC simulation.** ~~`simulate_sell_rpc` exists and has never been
+called.~~ **Done after this audit** — see "Since this audit" below. Until it
+produces verdicts, "sellable" still means "routable".
 
 **4. Quarantine the contaminated rows explicitly**, rather than relying on the
 analysis script's `--since` filter to remember. 14 impossible-cost positions and
@@ -224,3 +223,35 @@ No key material. No path by which a strategy could bypass the sellability
 check. The defects found were optimism and sampling bias — which is the
 expected failure mode for this kind of system, and the reason for auditing
 before optimising rather than after.
+
+
+---
+
+## Since this audit
+
+**RPC verification is now wired in** (item F3). A sampled 6% of successful
+quotes is re-checked by building the real swap and running it through
+`simulateTransaction`. Costs +4% of Jupiter's budget, well inside the measured
+ceiling.
+
+Two design decisions are worth stating because both could have produced
+confident nonsense:
+
+*Whose account.* Simulating a sell needs an account that holds the token, and we
+hold nothing. The original helper defaulted to a zero-balance address, which
+reverts for insufficient funds on **every** token — that would have manufactured
+a pile of false "unsellable" verdicts indistinguishable from a real finding. The
+simulation now runs as an actual holder read from the chain, skipping bonding
+curves and AMM vaults. This measures whether *that holder* can sell, which is a
+proxy, not the same question. Stated as a limitation in `collector/verify.py`.
+
+*The check is not part of what it checks.* `exit_available` took the most recent
+exit attempt as decisive regardless of method, so verification rows would have
+changed which positions close and shifted the 26.3% headline. Paper trading is
+now explicitly restricted to routing quotes. The verification rows only produce
+one number: how often a "sellable" quote was wrong. If that rate comes back
+above 2%, every paper return in this project is overstated by roughly that share
+of its exits, and the audit will say so.
+
+Still no private key anywhere. `sigVerify: false`, public addresses only,
+nothing signable and nothing submittable.

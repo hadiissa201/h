@@ -16,6 +16,7 @@ project and not merely good hygiene:
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,10 +24,12 @@ from datetime import UTC, datetime
 import httpx
 from sqlalchemy.orm import Session
 
+from collector import verify
 from collector.models import HolderSnapshot, Token, TokenStatus
 from collector.ratelimit import Limiters
 from poc.sources import (
     FAILURE_BAD_REQUEST,
+    METHOD_QUOTE,
     FAILURE_TRANSPORT,
     ExitSimulation,
     fetch_dexscreener,
@@ -208,13 +211,13 @@ def simulate_exit(session: Session, client: httpx.Client, limiters: Limiters,
                 # Request was doing.
                 kind = (FAILURE_TRANSPORT if resp.status_code in (403, 429)
                         or resp.status_code >= 500 else FAILURE_BAD_REQUEST)
-                sim = ExitSimulation("quote", notional, None,
+                sim = ExitSimulation(METHOD_QUOTE, notional, None,
                                      failure_kind=kind,
                                      failure_reason=f"HTTP {resp.status_code}: "
                                                     f"{resp.text[:160]}")
             body, status = resp.text, resp.status_code
         except Exception as exc:  # noqa: BLE001
-            sim = ExitSimulation("quote", notional, None,
+            sim = ExitSimulation(METHOD_QUOTE, notional, None,
                                  failure_kind=FAILURE_TRANSPORT,
                                  failure_reason=f"{type(exc).__name__}: {exc}")
             body, status = None, None
@@ -236,7 +239,41 @@ def simulate_exit(session: Session, client: httpx.Client, limiters: Limiters,
         )
         _record_tradability(session, token, sim, now)
         last = f"${notional:.0f}: {_verdict(sim.succeeded)}"
+
+        # A quote said this could be sold. Sometimes check whether the chain
+        # agrees -- a route can exist for a token that cannot actually be
+        # transferred. Failure here never affects the quote row above.
+        if sim.succeeded and body:
+            last += _maybe_verify(session, client, limiters, settings, token,
+                                  body, notional, amount_raw)
     return WorkResult(True, last)
+
+
+def _maybe_verify(session: Session, client: httpx.Client, limiters: Limiters,
+                  settings, token: Token, quote_text: str,  # noqa: ANN001
+                  notional: float, amount_raw: int) -> str:
+    """Sampled chain-state verification. Never allowed to break collection."""
+    rate = getattr(settings, "rpc_verify_sample_rate", 0.0)
+    # Bucketed by the hour so a token is re-verified occasionally rather than
+    # once and never again -- liquidity and authorities both change.
+    bucket = datetime.now(UTC).strftime("%Y-%m-%dT%H")
+    if not verify.should_verify(token.address, rate, bucket):
+        return ""
+    if _rate_limited(limiters, "jupiter") or _rate_limited(limiters, "helius"):
+        return ""
+    try:
+        quote_body = json.loads(quote_text)
+    except (TypeError, ValueError):
+        return ""
+    if not isinstance(quote_body, dict):
+        return ""
+    try:
+        return " | " + verify.verify_exit(session, client, limiters, settings,
+                                          token, quote_body, notional, amount_raw)
+    except Exception as exc:  # noqa: BLE001
+        # The dataset matters more than the audit of the dataset.
+        log.warning("rpc verification failed for %s: %s", token.address[:12], exc)
+        return ""
 
 
 def _verdict(succeeded: bool | None) -> str:

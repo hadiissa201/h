@@ -174,6 +174,10 @@ def parse_dexscreener(body: str) -> MarketSnapshot | None:
     )
 
 
+METHOD_QUOTE = "quote"
+METHOD_RPC_SIM = "rpc_sim"
+
+
 def parse_jupiter_quote(body: str, notional_usd: float) -> ExitSimulation:
     """Turn a Jupiter response into a sellable / not-sellable verdict.
 
@@ -185,7 +189,7 @@ def parse_jupiter_quote(body: str, notional_usd: float) -> ExitSimulation:
         data = json.loads(body)
     except (TypeError, ValueError):
         # A body we cannot read is our problem, not the token's.
-        return ExitSimulation("quote", notional_usd, None,
+        return ExitSimulation(METHOD_QUOTE, notional_usd, None,
                               failure_kind=FAILURE_UNPARSEABLE,
                               failure_reason="unparseable response")
 
@@ -193,14 +197,14 @@ def parse_jupiter_quote(body: str, notional_usd: float) -> ExitSimulation:
     if not out:
         reason = data.get("error") or data.get("errorCode") or "no route returned"
         # We asked and got a real answer: there is no way out. THE finding.
-        return ExitSimulation("quote", notional_usd, False,
+        return ExitSimulation(METHOD_QUOTE, notional_usd, False,
                               failure_kind=FAILURE_NO_ROUTE,
                               failure_reason=str(reason)[:500], raw=data)
 
     route = data.get("routePlan") or []
     labels = [str((hop.get("swapInfo") or {}).get("label", "")) for hop in route]
     return ExitSimulation(
-        method="quote",
+        method=METHOD_QUOTE,
         notional_usd=notional_usd,
         succeeded=True,
         input_amount_raw=str(data.get("inAmount")) if data.get("inAmount") else None,
@@ -256,19 +260,26 @@ def simulate_sell_quote(client: httpx.Client, quote_url: str, mint: str,
                        resp.text, now, parsed=parsed)
     except Exception as exc:  # noqa: BLE001
         return Fetched("jupiter", quote_url, None, None, now,
-                       parsed=ExitSimulation("quote", notional_usd, None,
+                       parsed=ExitSimulation(METHOD_QUOTE, notional_usd, None,
                                              failure_kind=FAILURE_TRANSPORT,
                                              failure_reason=f"{type(exc).__name__}: {exc}"),
                        error=f"{type(exc).__name__}: {exc}")
 
 
 def simulate_sell_rpc(client: httpx.Client, swap_url: str, rpc_url: str,
-                      quote_body: dict, notional_usd: float) -> Fetched:
+                      quote_body: dict, notional_usd: float,
+                      user_public_key: str | None = None) -> Fetched:
     """Build an unsigned swap and run it through simulateTransaction.
 
     Stronger than a quote: this executes against real chain state and catches
     frozen accounts, transfer hooks and failing token programs that a routing
     calculation cannot see.
+
+    `user_public_key` should be an address that actually HOLDS the token --
+    otherwise the simulation reverts for insufficient funds on every token and
+    the result says nothing about sellability. Callers pass a holder read from
+    the chain; the default is a zero-balance address useful only for probing
+    whether the endpoints respond at all.
 
     The fee payer is a public address we do not control. `sigVerify: false`
     means the node does not require -- and we never produce -- a signature.
@@ -278,19 +289,19 @@ def simulate_sell_rpc(client: httpx.Client, swap_url: str, rpc_url: str,
     try:
         built = client.post(swap_url, json={
             "quoteResponse": quote_body,
-            "userPublicKey": SIMULATION_FEE_PAYER,
+            "userPublicKey": user_public_key or SIMULATION_FEE_PAYER,
             "wrapAndUnwrapSol": True,
         }, timeout=TIMEOUT)
         if built.status_code != 200:
             return Fetched("jupiter-swap", swap_url, built.status_code, built.text, now,
-                           parsed=ExitSimulation("rpc_sim", notional_usd, None,
+                           parsed=ExitSimulation(METHOD_RPC_SIM, notional_usd, None,
                                                  failure_kind=FAILURE_BUILD,
                                                  failure_reason=f"build failed "
                                                                 f"HTTP {built.status_code}"))
         tx = (built.json() or {}).get("swapTransaction")
         if not tx:
             return Fetched("jupiter-swap", swap_url, built.status_code, built.text, now,
-                           parsed=ExitSimulation("rpc_sim", notional_usd, None,
+                           parsed=ExitSimulation(METHOD_RPC_SIM, notional_usd, None,
                                                  failure_kind=FAILURE_BUILD,
                                                  failure_reason="no swapTransaction returned"))
 
@@ -304,14 +315,14 @@ def simulate_sell_rpc(client: httpx.Client, swap_url: str, rpc_url: str,
         err = value.get("err")
         return Fetched("solana-rpc", rpc_url, sim.status_code, sim.text, now,
                        parsed=ExitSimulation(
-                           method="rpc_sim", notional_usd=notional_usd,
+                           method=METHOD_RPC_SIM, notional_usd=notional_usd,
                            succeeded=err is None and "result" in body,
                            failure_kind=None if err is None else FAILURE_REVERTED,
                            failure_reason=None if err is None else json.dumps(err)[:500],
                            raw=value))
     except Exception as exc:  # noqa: BLE001
         return Fetched("solana-rpc", rpc_url, None, None, now,
-                       parsed=ExitSimulation("rpc_sim", notional_usd, None,
+                       parsed=ExitSimulation(METHOD_RPC_SIM, notional_usd, None,
                                              failure_kind=FAILURE_TRANSPORT,
                                              failure_reason=f"{type(exc).__name__}: {exc}"),
                        error=f"{type(exc).__name__}: {exc}")

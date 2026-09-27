@@ -30,6 +30,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from collector.models import Observation, PaperPosition, SimulatedExit, Token
+from poc.sources import METHOD_QUOTE
 
 log = logging.getLogger("collector.paper")
 
@@ -212,7 +213,12 @@ def exit_reason_unavailable(session: Session, token_id: int, moment: datetime,
     row = session.scalars(
         select(SimulatedExit)
         .where(SimulatedExit.token_id == token_id,
-               SimulatedExit.simulated_ts <= moment)
+               SimulatedExit.simulated_ts <= moment,
+               # Routing quotes only. RPC verification runs on a small sample
+               # and is a check ON this measurement, not part of it -- letting
+               # its rows in here would change which positions close and shift
+               # the headline unsellability rate, so the two never mix.
+               SimulatedExit.method == METHOD_QUOTE)
         .order_by(SimulatedExit.simulated_ts.desc()).limit(1)).first()
     if row is None:
         return "unknown"
@@ -248,7 +254,12 @@ def exit_available(session: Session, token_id: int, moment: datetime,
     row = session.scalars(
         select(SimulatedExit)
         .where(SimulatedExit.token_id == token_id,
-               SimulatedExit.simulated_ts <= moment)
+               SimulatedExit.simulated_ts <= moment,
+               # Routing quotes only. RPC verification runs on a small sample
+               # and is a check ON this measurement, not part of it -- letting
+               # its rows in here would change which positions close and shift
+               # the headline unsellability rate, so the two never mix.
+               SimulatedExit.method == METHOD_QUOTE)
         .order_by(SimulatedExit.simulated_ts.desc()).limit(1)).first()
     if row is None or not row.succeeded:
         return None

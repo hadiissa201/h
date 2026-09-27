@@ -89,6 +89,11 @@ class CollectorSettings(BaseSettings):
     # Three sizes per cycle triples the cost against the TIGHTEST budget we
     # have, for information that barely moves minute to minute.
     exit_notional_usd: float = 100.0
+    # Fraction of SUCCESSFUL quotes re-checked against chain state. Each check
+    # costs roughly four extra calls, so this is deliberately small: it only
+    # has to estimate a rate, not cover every exit. 0 disables the check and
+    # leaves the project measuring routing alone.
+    rpc_verify_sample_rate: float = 0.06
     # Kept as a string and parsed in a property: pydantic-settings JSON-decodes
     # list fields at the source layer, so "100,500,1000" from a .env file fails
     # before any validator runs. The same trap cost us a boot failure on the

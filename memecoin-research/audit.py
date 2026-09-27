@@ -26,6 +26,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from collector.config import load_settings
+from collector import verify
 from collector.models import (
     CollectionGap,
     Observation,
@@ -219,9 +220,32 @@ def audit_rpc_simulation(session: Session) -> None:
     if methods.get("rpc_sim", 0) == 0:
         finding("KNOWN GAP",
                 "ZERO rpc_sim rows. The unsigned simulateTransaction path exists "
-                "in poc/sources.py but the collector never calls it. We test "
-                "ROUTING only; a frozen account or transfer hook would not be "
-                "caught. This is a real limit on what 'sellable' means here.")
+                "but nothing has called it yet. We test ROUTING only; a frozen "
+                "account or transfer hook would not be caught. This is a real "
+                "limit on what 'sellable' means here.")
+    else:
+        counts = verify.disagreement_rate(session)
+        print(f"\n  {verify.describe(counts)}")
+        print(f"    would land:  {counts['would_land']}")
+        print(f"    would FAIL:  {counts['would_revert']}")
+        print(f"    unknown:     {counts['unknown']}  (could not run the check)")
+        rate = counts["quote_false_positive_rate"]
+        if rate is None:
+            finding("KNOWN GAP",
+                    f"{counts['unknown']} verification attempts, none of which "
+                    f"returned a verdict. The check is running but learning "
+                    f"nothing -- treat sellability as routing-only until this "
+                    f"produces answers.")
+        elif rate > 0.02:
+            finding("OVERSTATED",
+                    f"{rate:.1%} of quotes that said 'sellable' would NOT have "
+                    f"landed on chain. Every paper return in this project is "
+                    f"overstated by roughly that share of its exits, because "
+                    f"paper trading closes on the quote verdict. Do not compare "
+                    f"strategies until this is folded in.")
+        else:
+            print(f"\n    OK: quote verdicts matched chain state within "
+                  f"{rate:.1%}; routing is a fair proxy at this sample size.")
     print("\n  Wallet safety: no private key exists in this codebase; "
           "tests/test_no_wallet.py fails the build if one is added.")
 
