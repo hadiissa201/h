@@ -12,10 +12,16 @@ import itertools
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
-from collector.models import Base, Observation, PaperPosition, Token
+from collector.models import (
+    Base,
+    Observation,
+    PaperPosition,
+    SimulatedExit,
+    Token,
+)
 from collector.paper import (
     Strategy,
     consider_entry,
@@ -754,3 +760,42 @@ def test_net_always_reconciles_with_gross_minus_charged_costs(session):
         assert float(position.net_pnl_usd) == pytest.approx(gross - charged, abs=0.01), \
             f"case {i}: net must equal gross - charged costs"
         assert float(position.net_pnl_usd) >= -float(position.notional_usd) - 0.01
+
+
+def test_sale_needs_a_verdict_from_during_the_hold(session):
+    """A pre-entry liquidity check must not authorise a sale.
+
+    The audit traced a position that entered and exited 20 seconds later with
+    zero exit checks in between, on the verdict that let it in -- one taken
+    before a 62% collapse. That verdict proves the token was sellable before
+    the crash, which is not the question being asked at exit.
+    """
+    token = make_token(session)
+    position = open_position(session, token, entry=0.001)
+    opened = position.opened_ts
+    # No exit check after the entry -- only the pre-entry one open_position made.
+    assert session.scalar(select(func.count()).select_from(SimulatedExit)
+                          .where(SimulatedExit.simulated_ts > opened)) == 0
+
+    moment = opened + timedelta(seconds=20)
+    observe(session, token, moment, 0.0004)    # -60%, a stop-loss
+    reason = manage_position(session, position, STRAT)
+
+    assert reason is None, "sold on a verdict taken before we even bought"
+    assert position.is_open is True
+    # Attributed to our sampling rate, not to the market's liquidity.
+    assert position.blocked_our_fault >= 1
+    assert position.blocked_no_route == 0
+
+
+def test_sale_proceeds_on_a_verdict_from_inside_the_hold(session):
+    """The counterpart: fresh evidence during the hold does authorise a sale."""
+    token = make_token(session)
+    position = open_position(session, token, entry=0.001)
+    moment = position.opened_ts + timedelta(seconds=20)
+    observe(session, token, moment, 0.0004)
+    can_sell(session, token, moment)
+    session.commit()
+
+    assert manage_position(session, position, STRAT) == "stop_loss"
+    assert position.is_open is False

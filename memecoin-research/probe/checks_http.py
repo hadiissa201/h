@@ -307,6 +307,10 @@ def check_jupiter_swap_build(report: Report, client: httpx.Client,
                              f"{type(exc).__name__}: {exc}", url))
 
 
+# SPL Token and Token-2022 both spell mint creation these two ways.
+_MINT_INIT_TYPES = frozenset({"initializeMint", "initializeMint2"})
+
+
 # ------------------------------------------------- resolving a real new mint
 def resolve_mint_from_signature(report: Report, client: httpx.Client, rpc_url: str,
                                 signatures: list[str]) -> str | None:
@@ -330,10 +334,7 @@ def resolve_mint_from_signature(report: Report, client: httpx.Client, rpc_url: s
             result = body.get("result")
             if not result:
                 continue
-            balances = (result.get("meta") or {}).get("postTokenBalances") or []
-            mints = {b.get("mint") for b in balances if b.get("mint")}
-            mints.discard(WSOL_MINT)
-            mints.discard(USDC_MINT)
+            mints = _mints_in_transaction(result)
             if not mints:
                 continue
             mint = sorted(mints)[0]
@@ -349,6 +350,47 @@ def resolve_mint_from_signature(report: Report, client: httpx.Client, rpc_url: s
                      f"tried {min(8, len(signatures))} creation signatures, none carried a "
                      "new mint in postTokenBalances", rpc_url))
     return None
+
+
+def _mints_in_transaction(result: dict) -> set[str]:
+    """Every new mint this transaction created, by two independent routes.
+
+    postTokenBalances alone is launchpad-specific: it only lists mints that a
+    token account HELD a balance of afterwards. pump.fun mints the full supply
+    to its bonding curve in the same transaction, so the mint appears. Raydium
+    LaunchLab does not, so it did not -- and an audit found 51.8% of LaunchLab
+    detections being discarded as unresolvable against 17.7% of pump.fun's.
+    That 34-point gap was this function's blind spot, not a fact about Raydium,
+    and it was silently biasing the sample towards one launchpad.
+
+    So also read the initializeMint instruction, which names the mint account
+    directly whether or not anyone holds it yet.
+    """
+    meta = result.get("meta") or {}
+    mints: set[str] = {b.get("mint") for b in (meta.get("postTokenBalances") or [])
+                       if b.get("mint")}
+
+    instructions = list(((result.get("transaction") or {}).get("message") or {})
+                        .get("instructions") or [])
+    for inner in meta.get("innerInstructions") or []:
+        # Launchpads call through their own program, so the mint is usually
+        # created in an inner instruction, not a top-level one.
+        instructions.extend(inner.get("instructions") or [])
+
+    for instruction in instructions:
+        parsed = instruction.get("parsed") if isinstance(instruction, dict) else None
+        if not isinstance(parsed, dict):
+            continue
+        if parsed.get("type") not in _MINT_INIT_TYPES:
+            continue
+        mint = (parsed.get("info") or {}).get("mint")
+        if mint:
+            mints.add(mint)
+
+    mints.discard(None)
+    mints.discard(WSOL_MINT)
+    mints.discard(USDC_MINT)
+    return mints
 
 
 def measure_sustained_rate(report: Report, client: httpx.Client, service: str,

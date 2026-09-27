@@ -72,6 +72,12 @@ class Strategy:
     min_verdict_age_s: float = 300.0
     # Multiple of the current tier's exit-simulation interval to tolerate.
     verdict_age_cadence_multiple: float = 2.5
+    # The verdict authorising a SALE must come from during the hold, not from
+    # before entry. An audit trace showed positions closing 20 seconds after
+    # entry, with zero exit checks in between, on the same verdict that let
+    # them in -- one taken before a 62% collapse. A liquidity check from
+    # before the crash is not evidence you could sell after it.
+    require_verdict_after_entry: bool = True
 
     # ---- costs, charged on both legs
     round_trip_cost_pct: float = 0.01    # priority fees + DEX fees + tips
@@ -263,6 +269,10 @@ def _age_s(token: Token, moment: datetime) -> float:
     return (moment - detected).total_seconds()
 
 
+def _aware(moment: datetime) -> datetime:
+    return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
+
+
 def _age_s_from_open(position: PaperPosition, moment: datetime) -> float:
     opened = position.opened_ts
     if opened.tzinfo is None:
@@ -389,6 +399,12 @@ def manage_position(session: Session, position: PaperPosition,
     budget = (verdict_age_budget(settings, strategy, age) if settings is not None
               else strategy.min_verdict_age_s)
     sellable = exit_available(session, position.token_id, moment, budget)
+    if (sellable is not None and strategy.require_verdict_after_entry
+            and _aware(sellable.simulated_ts) <= _aware(position.opened_ts)):
+        # Proven sellable at or before the moment we bought, never re-checked
+        # since. That is permission to enter, not permission to exit: you
+        # cannot buy and sell on one liquidity check.
+        sellable = None
     if sellable is not None and (position.peak_multiple is None
                                  or multiple > float(position.peak_multiple)):
         position.peak_multiple = multiple
@@ -413,6 +429,10 @@ def manage_position(session: Session, position: PaperPosition,
         # The rule fired but we could not act. WHY matters: only 'no_route' is
         # a fact about the market. 'stale' and 'unknown' are facts about us.
         why = exit_reason_unavailable(session, position.token_id, moment, budget)
+        if why == "available":
+            # A verdict exists but it predates entry. Our sampling rate, not
+            # the market's liquidity.
+            why = "stale"
         position.blocked_exits = (position.blocked_exits or 0) + 1
         if why == "no_route":
             position.blocked_no_route = (position.blocked_no_route or 0) + 1
