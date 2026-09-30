@@ -323,7 +323,7 @@ def test_the_control_enters_a_token_the_filters_would_reject(session):
 
     token = make_token(session)
     at = TS + timedelta(seconds=30)
-    observe(session, token, at, 0.001, liquidity=300.0, buys=1)  # thin and quiet
+    observe(session, token, at, 0.001, liquidity=3_000.0, buys=1)  # thin and quiet
     can_sell(session, token, at)
     session.commit()
 
@@ -455,7 +455,7 @@ def test_a_token_too_young_for_the_late_arm_is_rejected(session):
     early, late = SNIPER_STRATEGIES
     token = make_token(session)
     at = TS + timedelta(seconds=20)           # 20 seconds old
-    observe(session, token, at, 0.001, liquidity=500.0, buys=1)
+    observe(session, token, at, 0.001, liquidity=3_000.0, buys=1)
     can_sell(session, token, at)
     session.commit()
 
@@ -469,7 +469,7 @@ def test_a_token_too_old_for_the_early_arm_is_rejected(session):
     early, late = SNIPER_STRATEGIES
     token = make_token(session)
     at = TS + timedelta(seconds=400)          # ~7 minutes old
-    observe(session, token, at, 0.001, liquidity=500.0, buys=1)
+    observe(session, token, at, 0.001, liquidity=3_000.0, buys=1)
     can_sell(session, token, at)
     session.commit()
 
@@ -799,3 +799,78 @@ def test_sale_proceeds_on_a_verdict_from_inside_the_hold(session):
 
     assert manage_position(session, position, STRAT) == "stop_loss"
     assert position.is_open is False
+
+
+# ------------------------------------------------- order feasibility at entry
+def test_an_order_larger_than_the_pool_is_not_placed(session):
+    """The trace that prompted this: $100 into a pool holding $1.
+
+    That is one hundred times the entire pool. The position reported a tidy
+    -14% loss, which is fiction -- the trade could not have happened at the
+    quoted price or at any price. The unfiltered baseline must refuse it too,
+    because this is about arithmetic, not about strategy.
+    """
+    from collector.paper import DEFAULT_STRATEGIES
+
+    control = next(s for s in DEFAULT_STRATEGIES if s.name == "control_any")
+    assert control.min_liquidity_usd == 0.0, "control must filter nothing"
+
+    token = make_token(session)
+    at = TS + timedelta(seconds=30)
+    observe(session, token, at, 0.001, liquidity=1.0, buys=30)
+    can_sell(session, token, at)
+    session.commit()
+
+    assert consider_entry(session, token, control) is False
+    assert session.scalar(select(func.count()).select_from(PaperPosition)) == 0
+
+
+def test_a_pool_with_no_recorded_liquidity_is_not_traded(session):
+    """Liquidity of zero is not a deep pool, and a trace showed an entry at $0."""
+    from collector.paper import DEFAULT_STRATEGIES
+
+    control = next(s for s in DEFAULT_STRATEGIES if s.name == "control_any")
+    token = make_token(session)
+    at = TS + timedelta(seconds=30)
+    observe(session, token, at, 0.001, liquidity=0.0, buys=30)
+    can_sell(session, token, at)
+    session.commit()
+    assert consider_entry(session, token, control) is False
+
+
+def test_an_order_the_pool_can_absorb_is_placed(session):
+    """The boundary, so the gate cannot quietly become a liquidity filter."""
+    from collector.paper import MAX_POOL_FRACTION, DEFAULT_STRATEGIES
+
+    control = next(s for s in DEFAULT_STRATEGIES if s.name == "control_any")
+    token = make_token(session)
+    at = TS + timedelta(seconds=30)
+    # Exactly the largest pool share allowed.
+    observe(session, token, at, 0.001,
+            liquidity=control.notional_usd / MAX_POOL_FRACTION, buys=30)
+    can_sell(session, token, at)
+    session.commit()
+    assert consider_entry(session, token, control) is True
+
+
+def test_the_gate_scales_with_order_size_not_a_fixed_dollar_floor(session):
+    """A pool too thin for $100 may be fine for $10. The gate is relative."""
+    from collector.paper import MAX_POOL_FRACTION
+
+    token = make_token(session)
+    at = TS + timedelta(seconds=30)
+    observe(session, token, at, 0.001, liquidity=200.0, buys=30)
+    can_sell(session, token, at)
+    session.commit()
+
+    big = Strategy(name="big", max_age_s=600, min_liquidity_usd=0.0,
+                   min_buys_5m=0, take_profit_multiple=3.0,
+                   stop_loss_multiple=0.5, time_stop_s=3600,
+                   notional_usd=100.0, round_trip_cost_pct=0.01)
+    small = Strategy(name="small", max_age_s=600, min_liquidity_usd=0.0,
+                     min_buys_5m=0, take_profit_multiple=3.0,
+                     stop_loss_multiple=0.5, time_stop_s=3600,
+                     notional_usd=200.0 * MAX_POOL_FRACTION,
+                     round_trip_cost_pct=0.01)
+    assert consider_entry(session, token, big) is False
+    assert consider_entry(session, token, small) is True

@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from collector.config import load_settings
 from collector import verify
+from collector.paper import MAX_POOL_FRACTION
 from poc.sources import FAILURE_UNPRICED, METHOD_QUOTE
 from collector.models import (
     CollectionGap,
@@ -220,6 +221,31 @@ def audit_exit_classification(session: Session) -> None:
                 f"current one, which quoted a far larger trade than intended. "
                 f"Fixed going forward; these rows overstate costs and any "
                 f"'no route' they produced overstates unsellability.")
+
+    infeasible = session.scalar(
+        select(func.count()).select_from(PaperPosition)
+        .where(PaperPosition.entry_liquidity_usd.is_not(None),
+               PaperPosition.notional_usd
+               > PaperPosition.entry_liquidity_usd * MAX_POOL_FRACTION))
+    if infeasible:
+        worst = session.execute(
+            select(PaperPosition.id, PaperPosition.strategy,
+                   PaperPosition.notional_usd, PaperPosition.entry_liquidity_usd)
+            .where(PaperPosition.entry_liquidity_usd.is_not(None),
+                   PaperPosition.entry_liquidity_usd > 0)
+            .order_by((PaperPosition.notional_usd
+                       / PaperPosition.entry_liquidity_usd).desc()).limit(1)).first()
+        detail = ""
+        if worst:
+            pid, strat, notional, liq = worst
+            detail = (f" Worst: position {pid} ({strat}) staked ${float(notional):,.0f} "
+                      f"against ${float(liq):,.2f} of liquidity -- "
+                      f"{float(notional) / float(liq):,.0f}x the pool.")
+        finding("STALE DATA",
+                f"{infeasible} positions were opened with an order larger than "
+                f"{MAX_POOL_FRACTION:.0%} of the pool. Their entry prices were "
+                f"not transactable, so their P&L is fiction regardless of sign."
+                f"{detail} A feasibility gate now blocks these at entry.")
 
     legacy = session.scalar(
         select(func.count()).select_from(SimulatedExit)

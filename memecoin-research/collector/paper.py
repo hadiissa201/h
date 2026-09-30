@@ -178,6 +178,13 @@ def latest_observation(session: Session, token_id: int) -> Observation | None:
 # with a smaller quoted impact that would have booked as an enormous fake win.
 IMPLAUSIBLE_MULTIPLE = 1_000.0
 
+# The largest share of a pool a single paper order may represent. Above this the
+# quoted price is not a price we could have transacted at, so the position is
+# not recorded at all -- the token stays tracked, it simply is not bought.
+# Deliberately generous: the aim is to exclude the impossible, not to impose a
+# view about what is wise.
+MAX_POOL_FRACTION = 0.10
+
 
 def verdict_age_budget(settings, strategy: "Strategy", age_s: float) -> float:  # noqa: ANN001
     """How old an exit verdict may be before it stops authorising a sale.
@@ -312,6 +319,15 @@ def consider_entry(session: Session, token: Token, strategy: Strategy) -> bool:
         return False
     liquidity = float(obs.liquidity_usd or 0.0)
     if not (strategy.min_liquidity_usd <= liquidity <= strategy.max_liquidity_usd):
+        return False
+    # A feasibility gate, not a strategy filter, so it applies to every
+    # strategy including the unfiltered baseline. An audit trace showed a $100
+    # position opened against a pool holding $1 -- one hundred times the entire
+    # pool -- which then reported a tidy -14% loss. That number is fiction: the
+    # trade could not have happened at the quoted price, or at any price. A
+    # strategy is free to choose a thin pool; it is not free to place an order
+    # the pool could not absorb.
+    if liquidity <= 0 or strategy.notional_usd > liquidity * MAX_POOL_FRACTION:
         return False
     if (obs.buys_5m or 0) < strategy.min_buys_5m:
         return False
