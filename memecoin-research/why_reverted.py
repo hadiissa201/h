@@ -32,6 +32,14 @@ OUR_FAULT_MARKERS = (
     ("build failed", "Jupiter would not build the swap for that holder"),
     ("no swapTransaction", "Jupiter would not build the swap for that holder"),
     ("BlockhashNotFound", "a transient node error, not the token"),
+    # The first four live verifications were all this: the chosen fee payer was
+    # a PDA (a pool vault's owner), which cannot pay fees. Solana rejects the
+    # transaction before the token is involved, so the revert carried no
+    # information about sellability at all.
+    ("InvalidAccountForFee", "the fee payer could not pay fees (a PDA or an "
+                             "unfunded wallet) -- nothing to do with the token"),
+    ("InsufficientFundsForFee", "the fee payer had too little SOL"),
+    ("AccountNotFound", "the fee payer account does not exist"),
 )
 
 # Signatures of a genuine restriction on selling.

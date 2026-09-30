@@ -121,7 +121,20 @@ def _largest(*accounts):
 
 
 def _owner(pubkey):
+    """getAccountInfo on a TOKEN account: names the wallet that owns it."""
     return FakeResponse({"result": {"value": {"data": {"parsed": {"info": {"owner": pubkey}}}}}})
+
+
+def _wallet(lamports=50_000_000):
+    """getAccountInfo on that wallet: a plain funded account, able to pay fees."""
+    return FakeResponse({"result": {"value": {"owner": verify.SYSTEM_PROGRAM,
+                                              "lamports": lamports, "data": {}}}})
+
+
+def _pda(program="LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj"):
+    """A program-derived address. Holds tokens, cannot pay fees."""
+    return FakeResponse({"result": {"value": {"owner": program,
+                                              "lamports": 2_039_280, "data": {}}}})
 
 
 def test_the_bonding_curve_is_not_used_as_a_holder():
@@ -132,6 +145,7 @@ def test_the_bonding_curve_is_not_used_as_a_holder():
                  {"address": "HumanAta", "amount": "100000000"}),
         _owner(CURVE),
         _owner("RealPerson1111111111111111111111111111111111"),
+        _wallet(),
     ])
     owner, note = verify.find_holder(client, "http://rpc", "mint", 1_000)
     assert owner == "RealPerson1111111111111111111111111111111111"
@@ -142,7 +156,51 @@ def test_a_holder_too_small_to_sell_our_size_is_skipped():
     client = FakeClient([_largest({"address": "Tiny", "amount": "5"})])
     owner, note = verify.find_holder(client, "http://rpc", "mint", 1_000_000)
     assert owner is None
-    assert "no eligible holder" in note
+    assert "no holder" in note
+
+
+def test_a_pda_is_never_chosen_as_the_fee_payer():
+    """The bug that produced four meaningless 'would revert' rows.
+
+    A pool vault's owner is a PDA derived from the launchpad program, not the
+    program id, so an id blocklist misses it. A PDA cannot pay fees: Solana
+    rejects with InvalidAccountForFee before the token is involved at all, and
+    that revert was being recorded as though the coin could not be sold.
+    """
+    client = FakeClient([
+        _largest({"address": "VaultAta", "amount": "900000000"}),
+        _owner("PoolPda11111111111111111111111111111111111"),
+        _pda(),
+    ])
+    owner, note = verify.find_holder(client, "http://rpc", "mint", 1_000)
+    assert owner is None
+    assert "cannot pay fees" in note
+
+
+def test_a_broke_wallet_is_not_chosen_either():
+    """Holds the token but has no SOL, so the simulation would revert on fees."""
+    client = FakeClient([
+        _largest({"address": "BrokeAta", "amount": "900000000"}),
+        _owner("BrokeWallet1111111111111111111111111111111"),
+        _wallet(lamports=1_000),
+    ])
+    owner, note = verify.find_holder(client, "http://rpc", "mint", 1_000)
+    assert owner is None
+    assert "lamports" in note
+
+
+def test_a_pda_holder_is_skipped_for_a_funded_wallet_behind_it():
+    """The vault is biggest; the real holder further down is still usable."""
+    client = FakeClient([
+        _largest({"address": "VaultAta", "amount": "900000000"},
+                 {"address": "HumanAta", "amount": "100000000"}),
+        _owner("PoolPda11111111111111111111111111111111111"),
+        _pda(),
+        _owner("FundedHuman11111111111111111111111111111111"),
+        _wallet(),
+    ])
+    owner, _ = verify.find_holder(client, "http://rpc", "mint", 1_000)
+    assert owner == "FundedHuman11111111111111111111111111111111"
 
 
 def test_no_holder_is_recorded_as_unknown_never_as_unsellable(session, token):
@@ -216,6 +274,7 @@ def test_the_holder_actually_reaches_the_swap_build(session, token):
     client = RecordingClient([
         _largest({"address": "HumanAta", "amount": "9999999999"}),
         _owner(holder),
+        _wallet(),
         FakeResponse({"result": {"value": {"err": None}}}),   # simulateTransaction
     ])
     verify.verify_exit(session, client, None, Settings(), token,

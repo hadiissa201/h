@@ -48,9 +48,19 @@ from poc.store import insert_simulated_exit
 
 log = logging.getLogger("collector.verify")
 
-# Token accounts owned by a program, not a person: bonding curves, AMM vaults.
-# Simulating a sell from one tests the launchpad's plumbing, not a holder's
-# ability to exit, so they are skipped.
+# A fee payer must be a plain wallet: system-owned, with lamports. The largest
+# holders of a memecoin are pool vaults whose owner is a PDA derived from the
+# launchpad program -- not the program id itself, so an id blocklist does not
+# catch them. A PDA cannot pay fees, and Solana rejects the transaction with
+# InvalidAccountForFee before it ever reaches the token. That produced four
+# "would revert" rows that said nothing whatsoever about sellability.
+SYSTEM_PROGRAM = "11111111111111111111111111111111"
+
+# Enough SOL to cover fees and any account rent the swap needs. A wallet below
+# this cannot be simulated from even though it holds the token.
+MIN_FEE_PAYER_LAMPORTS = 10_000_000          # 0.01 SOL
+
+# Kept as a cheap first pass; the system-owner check below is the real filter.
 _PROGRAM_OWNERS = frozenset({
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
     "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
@@ -101,6 +111,8 @@ def find_holder(client: httpx.Client, rpc_url: str, mint: str,
     if not accounts:
         return None, "no holders returned"
 
+    rejected: list[str] = []
+
     for account in accounts[:5]:
         try:
             if int(account.get("amount") or 0) < min_amount_raw:
@@ -119,10 +131,42 @@ def find_holder(client: httpx.Client, rpc_url: str, mint: str,
             owner = ((parsed.get("data") or {}).get("parsed") or {}).get("info", {}).get("owner")
         except Exception as exc:  # noqa: BLE001
             return None, f"owner lookup failed: {type(exc).__name__}"
-        if owner and owner not in _PROGRAM_OWNERS:
+        if not owner or owner in _PROGRAM_OWNERS:
+            continue
+        ok, why = _can_pay_fees(client, rpc_url, owner, timeout)
+        if ok:
             return owner, f"holder {owner[:8]}... holding {account.get('amount')}"
+        rejected.append(f"{owner[:8]}...{why}")
 
-    return None, f"no eligible holder among {len(accounts)} accounts"
+    detail = "; ".join(rejected) if rejected else f"{len(accounts)} accounts"
+    return None, f"no holder that can pay fees ({detail})"
+
+
+def _can_pay_fees(client: httpx.Client, rpc_url: str, address: str,
+                  timeout: float) -> tuple[bool, str]:
+    """Is this a plain wallet with enough SOL to be a fee payer?
+
+    Without this check the simulation reverts with InvalidAccountForFee on any
+    PDA -- which is most large memecoin holders -- and the revert gets recorded
+    as though the token could not be sold.
+    """
+    try:
+        resp = client.post(rpc_url, json={
+            "jsonrpc": "2.0", "id": 1, "method": "getAccountInfo",
+            "params": [address, {"encoding": "jsonParsed"}],
+        }, timeout=timeout)
+        value = (((resp.json() or {}).get("result") or {}).get("value")) or {}
+    except Exception as exc:  # noqa: BLE001
+        return False, f" lookup failed ({type(exc).__name__})"
+
+    if not value:
+        return False, " account does not exist"
+    if value.get("owner") != SYSTEM_PROGRAM:
+        return False, " not a wallet (PDA or program account); cannot pay fees"
+    lamports = value.get("lamports") or 0
+    if lamports < MIN_FEE_PAYER_LAMPORTS:
+        return False, f" only {lamports} lamports"
+    return True, ""
 
 
 def verify_exit(session: Session, client: httpx.Client, limiters: Limiters,
