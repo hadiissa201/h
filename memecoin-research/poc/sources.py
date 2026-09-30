@@ -174,6 +174,10 @@ def parse_dexscreener(body: str) -> MarketSnapshot | None:
     )
 
 
+# Our own inability to size the order. Distinct from a routing failure, and
+# must never be counted as one.
+FAILURE_UNPRICED = "unpriced"
+
 METHOD_QUOTE = "quote"
 METHOD_RPC_SIM = "rpc_sim"
 

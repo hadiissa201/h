@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from collector.config import load_settings
 from collector import verify
+from poc.sources import FAILURE_UNPRICED
 from collector.models import (
     CollectionGap,
     Observation,
@@ -198,6 +199,24 @@ def audit_exit_classification(session: Session) -> None:
                        f"one of ours. Our outage is being counted as a rug.")
     else:
         print("\n    OK: no row is marked 'could not sell' for one of our own failures.")
+
+    unpriced = kinds.get(FAILURE_UNPRICED, 0)
+    if unpriced:
+        print(f"\n  {unpriced} quotes could not be sized at the current price "
+              f"and are recorded as unknown, not as unsellable.")
+
+    impossible = session.scalar(
+        select(func.count()).select_from(SimulatedExit)
+        .where(SimulatedExit.succeeded.is_(True),
+               SimulatedExit.price_impact_pct >= 1.0))
+    if impossible:
+        finding("STALE DATA",
+                f"{impossible} sellable quotes report price impact of 100% or "
+                f"more. A $100 order cannot move a funded pool that far; these "
+                f"come from orders sized at the DETECTION price rather than the "
+                f"current one, which quoted a far larger trade than intended. "
+                f"Fixed going forward; these rows overstate costs and any "
+                f"'no route' they produced overstates unsellability.")
 
     legacy = session.scalar(
         select(func.count()).select_from(SimulatedExit)

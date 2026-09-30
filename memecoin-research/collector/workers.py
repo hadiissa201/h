@@ -22,13 +22,15 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from collector import verify
-from collector.models import HolderSnapshot, Token, TokenStatus
+from collector.models import HolderSnapshot, Observation, Token, TokenStatus
 from collector.ratelimit import Limiters
 from poc.sources import (
     FAILURE_BAD_REQUEST,
+    FAILURE_UNPRICED,
     METHOD_QUOTE,
     FAILURE_TRANSPORT,
     ExitSimulation,
@@ -193,7 +195,7 @@ def simulate_exit(session: Session, client: httpx.Client, limiters: Limiters,
         if _rate_limited(limiters, "jupiter"):
             return WorkResult(False, "rate limited, requeued")
 
-        amount_raw = _amount_for_notional(session, token, notional)
+        amount_raw, size_is_real = _amount_for_notional(session, token, notional)
         params = {"inputMint": token.address, "outputMint": WSOL_MINT,
                   "amount": str(amount_raw),
                   "slippageBps": str(settings.exit_slippage_bps)}
@@ -203,7 +205,16 @@ def simulate_exit(session: Session, client: httpx.Client, limiters: Limiters,
                               timeout=settings.http_timeout_s)
             _note_429(limiters, "jupiter", resp.status_code)
             sim = parse_jupiter_quote(resp.text, notional)
-            if resp.status_code != 200 and not says_no_route(resp.text):
+            if not size_is_real:
+                # We could not ask the question we meant to ask. NULL, never
+                # False: a quote for the wrong size is not evidence that this
+                # token cannot be sold.
+                sim = ExitSimulation(METHOD_QUOTE, notional, None,
+                                     failure_kind=FAILURE_UNPRICED,
+                                     failure_reason="could not size the order at "
+                                                    "the current price; quote is "
+                                                    "for a different amount")
+            elif resp.status_code != 200 and not says_no_route(resp.text):
                 # Non-200 without an explicit routing failure is OUR problem:
                 # a malformed amount, a rate limit, an outage. Recording it as
                 # "cannot be sold" would turn our own bad requests into
@@ -311,29 +322,50 @@ _MIN_QUOTE_AMOUNT = 1_000
 _MAX_QUOTE_AMOUNT = 10 ** 18
 
 
-def _amount_for_notional(session: Session, token: Token, notional_usd: float) -> int:
-    """Raw token units approximating a dollar notional at the last known price.
+def _amount_for_notional(session: Session, token: Token,
+                         notional_usd: float) -> tuple[int, bool]:
+    """Raw token units worth `notional_usd` AT THE CURRENT PRICE.
 
-    Falls back to one whole token when no price is known yet. The notional is
-    stored alongside the result either way, so Phase 2 always knows what size
-    produced a given price impact -- impact without size is meaningless.
+    Returns (amount, trustworthy). trustworthy=False means the size we are
+    about to quote does not represent the dollar amount asked for, so whatever
+    comes back says nothing about selling that amount.
 
-    Clamped: a memecoin priced at 1e-11 turns $100 into an astronomically large
-    raw amount, and a near-zero one into a value below Jupiter's minimum. Both
-    return 400, and a 400 used to be filed as "this cannot be sold".
+    The current price, not the first one. Sizing off the detection price was a
+    real bug with two bad consequences: a token that had risen 1000x since
+    detection got a quote for 1000x the intended dollar size, which came back
+    with a near-total price impact (recorded as a cost) or with no route at all
+    (recorded as "this token cannot be sold"). The second is worse, because
+    unsellability is this project's central measurement and a quote for a
+    multi-billion-dollar sale is unroutable for reasons that have nothing to do
+    with the token.
     """
     decimals = token.decimals if token.decimals is not None else 6
-    status = session.get(TokenStatus, token.id)
+
     price = None
-    if status is not None and status.first_price_usd is not None:
-        price = float(status.first_price_usd)
-    elif status is not None and status.peak_price_usd is not None:
-        price = float(status.peak_price_usd)
-    if not price or price <= 0:
-        raw = 10 ** decimals
+    obs = session.scalars(
+        select(Observation).where(Observation.token_id == token.id,
+                                  Observation.price_usd.is_not(None))
+        .order_by(Observation.observed_ts.desc()).limit(1)).first()
+    if obs is not None and obs.price_usd and float(obs.price_usd) > 0:
+        price = float(obs.price_usd)
     else:
-        raw = int((notional_usd / price) * (10 ** decimals))
-    return max(_MIN_QUOTE_AMOUNT, min(_MAX_QUOTE_AMOUNT, raw))
+        # No observation yet. first_price is a worse estimate but an honest
+        # one; peak_price is not an estimate of the current price at all and is
+        # deliberately not used here.
+        status = session.get(TokenStatus, token.id)
+        if status is not None and status.first_price_usd:
+            price = float(status.first_price_usd)
+
+    if not price or price <= 0:
+        # One whole token: enough to ask whether ANY route exists, but not the
+        # requested notional, so the answer is not evidence about that size.
+        return 10 ** decimals, False
+
+    raw = int((notional_usd / price) * (10 ** decimals))
+    clamped = max(_MIN_QUOTE_AMOUNT, min(_MAX_QUOTE_AMOUNT, raw))
+    # A clamp means the honest size was outside what Jupiter accepts. The quote
+    # is then about a different trade than the one we asked about.
+    return clamped, clamped == raw
 
 
 # ------------------------------------------------------------------- holders
