@@ -13,13 +13,13 @@ Read-only.
 
 from __future__ import annotations
 
-import os
 import sys
 from collections import Counter
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from collector.config import load_settings
 from collector.models import SimulatedExit, Token
 from poc.sources import METHOD_RPC_SIM
 
@@ -57,11 +57,9 @@ def classify(reason: str) -> tuple[str, str]:
 
 
 def main() -> int:
-    url = os.environ.get("DATABASE_URL")
-    if not url:
-        print("DATABASE_URL is not set.")
-        return 2
-    engine = create_engine(url)
+    # Same settings path as audit.py, so .env is honoured rather than
+    # requiring the URL in the shell.
+    engine = create_engine(load_settings().database_url, future=True)
     verdicts: Counter[str] = Counter()
 
     with Session(engine) as session:
