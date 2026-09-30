@@ -27,7 +27,7 @@ from sqlalchemy.orm import Session
 
 from collector.config import load_settings
 from collector import verify
-from poc.sources import FAILURE_UNPRICED
+from poc.sources import FAILURE_UNPRICED, METHOD_QUOTE
 from collector.models import (
     CollectionGap,
     Observation,
@@ -162,19 +162,22 @@ def audit_costs(session: Session) -> None:
 # ------------------------------------------------------- 3. exit classification
 def audit_exit_classification(session: Session) -> None:
     head("3. EXIT CLASSIFICATION")
-    total = session.scalar(select(func.count()).select_from(SimulatedExit))
+    only_quotes = SimulatedExit.method == METHOD_QUOTE
+    total = session.scalar(
+        select(func.count()).select_from(SimulatedExit).where(only_quotes))
     counts = {
         "sellable (True)": session.scalar(
             select(func.count()).select_from(SimulatedExit)
-            .where(SimulatedExit.succeeded.is_(True))),
+            .where(only_quotes, SimulatedExit.succeeded.is_(True))),
         "no route (False)": session.scalar(
             select(func.count()).select_from(SimulatedExit)
-            .where(SimulatedExit.succeeded.is_(False))),
+            .where(only_quotes, SimulatedExit.succeeded.is_(False))),
         "unknown (NULL)": session.scalar(
             select(func.count()).select_from(SimulatedExit)
-            .where(SimulatedExit.succeeded.is_(None))),
+            .where(only_quotes, SimulatedExit.succeeded.is_(None))),
     }
-    print(f"  {total} simulated exits")
+    print(f"  {total} routing quotes (verification rows are counted in section 4,"
+          f" not here -- mixing them inflates 'no route')")
     for name, n in counts.items():
         print(f"    {name:20} {n:>7}  ({n / total * 100:5.1f}%)" if total else name)
     if sum(counts.values()) != total:
@@ -184,16 +187,16 @@ def audit_exit_classification(session: Session) -> None:
     kinds = Counter(
         k for (k,) in session.execute(
             select(SimulatedExit.failure_kind)
-            .where(SimulatedExit.failure_kind.is_not(None))).all())
+            .where(only_quotes, SimulatedExit.failure_kind.is_not(None))).all())
     for kind, n in kinds.most_common():
         print(f"    {kind:16} {n:>7}")
 
     # THE critical invariant: a transport failure must never be a failed sell.
     bad = session.scalar(
         select(func.count()).select_from(SimulatedExit)
-        .where(SimulatedExit.succeeded.is_(False),
+        .where(only_quotes, SimulatedExit.succeeded.is_(False),
                SimulatedExit.failure_kind.in_(
-                   ("transport", "bad_request", "unparseable"))))
+                   ("transport", "bad_request", "unparseable", FAILURE_UNPRICED))))
     if bad:
         finding("BUG", f"{bad} rows marked NOT SELLABLE whose failure_kind is "
                        f"one of ours. Our outage is being counted as a rug.")
@@ -249,7 +252,14 @@ def audit_rpc_simulation(session: Session) -> None:
         print(f"    would FAIL:  {counts['would_revert']}")
         print(f"    unknown:     {counts['unknown']}  (could not run the check)")
         rate = counts["quote_false_positive_rate"]
-        if rate is None:
+        if rate is not None and counts["verified"] < verify.MIN_VERIFIED_FOR_A_RATE:
+            finding("TOO EARLY",
+                    f"only {counts['verified']} verifications have returned a "
+                    f"verdict. Whatever share of them reverted, that is not yet "
+                    f"a measurement -- and the first thing to rule out is our "
+                    f"own method, not the market. Inspect the failure reasons "
+                    f"before drawing anything from this.")
+        elif rate is None:
             finding("KNOWN GAP",
                     f"{counts['unknown']} verification attempts, none of which "
                     f"returned a verdict. The check is running but learning "

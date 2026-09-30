@@ -187,7 +187,7 @@ def test_the_disagreement_rate_counts_only_answered_checks(session, token):
     assert counts["verified"] == 4          # the unknown is excluded
     assert counts["would_revert"] == 1
     assert counts["quote_false_positive_rate"] == pytest.approx(0.25)
-    assert "25.0%" in verify.describe(counts)
+    assert "25%" in verify.describe(counts)
 
 
 def test_the_holder_actually_reaches_the_swap_build(session, token):
@@ -226,3 +226,50 @@ def test_the_holder_actually_reaches_the_swap_build(session, token):
         "the swap was built for the wrong account; every sim would revert"
     row = session.query(SimulatedExit).filter_by(method=METHOD_RPC_SIM).one()
     assert row.succeeded is True
+
+
+def test_a_handful_of_checks_is_not_reported_as_a_rate(session, token):
+    """The audit's own bug, caught on real output.
+
+    The first live run verified two quotes, both reverted, and the audit
+    announced '100.0% of quotes that said sellable would NOT have landed'.
+    Two data points cannot support that, and at n=2 a systematic fault in our
+    method -- simulating as a holder who could not have sold anyway -- is
+    indistinguishable from a discovery about the market.
+    """
+    for i in range(2):
+        insert_simulated_exit(session, token_id=token.id,
+                              simulated_ts=TS + timedelta(minutes=i),
+                              method=METHOD_RPC_SIM, notional_usd=100.0,
+                              succeeded=False)
+    session.commit()
+
+    text = verify.describe(verify.disagreement_rate(session))
+    assert "TOO FEW" in text
+    assert "95% CI" in text, "a small-sample rate must carry its interval"
+
+
+def test_a_large_enough_sample_is_reported_as_a_rate(session, token):
+    for i in range(verify.MIN_VERIFIED_FOR_A_RATE):
+        insert_simulated_exit(session, token_id=token.id,
+                              simulated_ts=TS + timedelta(minutes=i),
+                              method=METHOD_RPC_SIM, notional_usd=100.0,
+                              succeeded=i % 4 != 0)
+    session.commit()
+    text = verify.describe(verify.disagreement_rate(session))
+    assert "TOO FEW" not in text
+    assert "95% CI" in text
+
+
+def test_the_interval_widens_as_the_sample_shrinks():
+    """Guards the direction of the statistic, not its exact value."""
+    wide_low, wide_high = verify.wilson_interval(1, 2)
+    tight_low, tight_high = verify.wilson_interval(50, 100)
+    assert (wide_high - wide_low) > (tight_high - tight_low)
+    # Two-for-two is not proof of certainty.
+    low, _ = verify.wilson_interval(2, 2)
+    assert low < 0.5
+
+
+def test_no_trials_claims_nothing():
+    assert verify.wilson_interval(0, 0) == (0.0, 1.0)

@@ -185,12 +185,41 @@ def disagreement_rate(session: Session) -> dict:
     }
 
 
+# Below this many answered checks, the rate is not reportable as a rate. Two
+# reverts out of two is 100% only in the sense that a coin landing heads twice
+# is a 100%-heads coin. It is also the size at which a systematic fault in our
+# own method -- simulating as a holder who could not have sold anyway -- looks
+# exactly like a finding about the market.
+MIN_VERIFIED_FOR_A_RATE = 20
+
+
+def wilson_interval(successes: int, trials: int, z: float = 1.96) -> tuple[float, float]:
+    """95% CI for a proportion, correct at small n where the normal one is not.
+
+    Reported alongside every rate so a number resting on a handful of checks
+    cannot be read as a measurement.
+    """
+    if trials <= 0:
+        return (0.0, 1.0)
+    phat = successes / trials
+    denom = 1 + z**2 / trials
+    centre = (phat + z**2 / (2 * trials)) / denom
+    margin = z * ((phat * (1 - phat) / trials + z**2 / (4 * trials**2)) ** 0.5) / denom
+    return (max(0.0, centre - margin), min(1.0, centre + margin))
+
+
 def describe(counts: dict) -> str:
     rate = counts["quote_false_positive_rate"]
+    n = counts["verified"]
     if rate is None:
         return "no quotes verified against chain state yet -- routing only"
-    return (f"{counts['verified']} quotes verified, {counts['would_revert']} would have "
-            f"reverted ({rate:.1%} of sellable verdicts were wrong)")
+    low, high = wilson_interval(counts["would_revert"], n)
+    body = (f"{n} quotes verified, {counts['would_revert']} would have reverted "
+            f"({rate:.0%}, 95% CI {low:.0%}-{high:.0%})")
+    if n < MIN_VERIFIED_FOR_A_RATE:
+        return (f"{body} -- TOO FEW TO BE A RATE (need {MIN_VERIFIED_FOR_A_RATE}); "
+                f"at this size our own method failing looks identical to a finding")
+    return body
 
 
 __all__ = ["FAILURE_NO_HOLDER", "describe", "disagreement_rate", "find_holder",
