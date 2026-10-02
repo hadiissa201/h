@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from collector.config import CollectorSettings
 from collector.models import Base, CollectionGap, SimulatedExit, Token
-from collector.ratelimit import TokenBucket
+from collector.ratelimit import TokenBucket, build_limiters
 from collector.research import (
     Coverage,
     coverage,
@@ -359,3 +359,28 @@ def test_the_same_signature_is_only_pending_once(session):
     already = session.scalar(
         select(PendingDetection.id).where(PendingDetection.signature == "SIG3"))
     assert already is not None
+
+
+def test_the_buckets_absorb_a_cluster_without_refusing_it(settings):
+    """The third ingredient in the production backlog.
+
+    A bucket whose burst equals its rate has no tolerance for clustering.
+    Scheduled work arrives in clusters, and draining 140 items at 1.5/s takes
+    93 seconds while workers give up after 15 -- so nearly all were refused,
+    requeued together, and arrived as a cluster again.
+    """
+    limiters = build_limiters(settings)
+    jupiter = limiters.get("jupiter")
+    cluster = sum(jupiter.acquire(max_wait=0.0) for _ in range(12))
+    assert cluster >= 10, f"only absorbed {cluster} of a 12-request cluster"
+
+
+def test_the_burst_reserve_does_not_raise_the_long_run_rate(settings):
+    """Burst tolerance is not permission to exceed the measured ceiling."""
+    limiters = build_limiters(settings)
+    jupiter = limiters.get("jupiter")
+    assert jupiter.rate == settings.jupiter_rps
+    # Drain the reserve, then the next request must wait rather than pass.
+    while jupiter.acquire(max_wait=0.0):
+        pass
+    assert jupiter.acquire(max_wait=0.0) is False

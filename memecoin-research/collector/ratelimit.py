@@ -134,8 +134,19 @@ class Limiters:
 
 
 def build_limiters(settings) -> Limiters:  # noqa: ANN001 -- CollectorSettings
+    """One bucket per service, each able to absorb a short cluster.
+
+    The burst reserve matters as much as the rate. Scheduled work arrives in
+    clusters, and a bucket whose burst equals its rate refuses nearly all of a
+    cluster, which then returns as a cluster. The long-run rate is what the
+    services actually enforce.
+    """
+    seconds = getattr(settings, "limiter_burst_seconds", 8.0)
     return Limiters(
-        dexscreener=TokenBucket(settings.dexscreener_rps, "dexscreener"),
-        jupiter=TokenBucket(settings.jupiter_rps, "jupiter"),
-        helius=TokenBucket(settings.helius_rps, "helius"),
+        dexscreener=TokenBucket(settings.dexscreener_rps, "dexscreener",
+                                burst=settings.dexscreener_rps * seconds),
+        jupiter=TokenBucket(settings.jupiter_rps, "jupiter",
+                            burst=settings.jupiter_rps * seconds),
+        helius=TokenBucket(settings.helius_rps, "helius",
+                           burst=settings.helius_rps * seconds),
     )

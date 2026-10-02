@@ -51,6 +51,15 @@ class CollectorSettings(BaseSettings):
     # during, which is data we can never get back.
     dexscreener_rps: float = Field(default=4.0, gt=0)
     jupiter_rps: float = Field(default=1.5, gt=0)
+    # Seconds of requests the buckets may hold in reserve to absorb clustering.
+    # The buckets previously allowed a burst of max(1.0, rate) -- 1.5 requests
+    # for Jupiter -- which is no tolerance at all. Work items come due in
+    # clusters, and draining a cluster of 140 at 1.5/s takes 93 seconds while
+    # workers give up after 15, so almost all of them were refused and
+    # requeued. Jupiter's own measured ceiling was 121 requests in 24.9s, so a
+    # reserve of a few seconds is comfortably inside it and the long-run rate
+    # is unchanged.
+    limiter_burst_seconds: float = Field(default=8.0, gt=0)
     helius_rps: float = Field(default=8.0, gt=0)
 
     # ------------------------------------------------------------- sampling
