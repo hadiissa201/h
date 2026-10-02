@@ -26,7 +26,14 @@ from collector.research import (
     was_sellable_at,
 )
 from collector.sampling import sample_score, should_track
-from collector.schedule import WorkKind, backoff_due, capacity, interval_for, tier_for
+from collector.schedule import (
+    WorkKind,
+    backoff_due,
+    capacity,
+    interval_for,
+    throttle_due,
+    tier_for,
+)
 from poc.store import insert_simulated_exit, open_gap, upsert_token
 
 TS = datetime(2026, 9, 24, 12, 0, tzinfo=UTC)
@@ -104,10 +111,42 @@ def test_capacity_is_bound_by_the_slowest_service(settings):
 
 
 def test_failed_work_backs_off_instead_of_hammering():
-    first = backoff_due(1, TS)
-    third = backoff_due(3, TS)
+    first = backoff_due(1, TS, jitter=0.0)
+    third = backoff_due(3, TS, jitter=0.0)
     assert third > first
     assert backoff_due(50, TS) <= TS + timedelta(seconds=900)
+
+
+def test_backoff_is_jittered_so_refused_work_does_not_return_as_a_herd():
+    """The production failure this fixes.
+
+    Without jitter this was a pure function of (attempts, now), so every item
+    refused in the same instant with the same attempt count got an identical
+    retry time. They stampeded the rate limiter together, all but one were
+    refused again, and all incremented in lockstep -- which is why 140 overdue
+    items were sitting at exactly 6 attempts rather than spread across counts.
+    """
+    due = {backoff_due(3, TS) for _ in range(40)}
+    assert len(due) > 30, "retry times are still clustered"
+
+
+def test_jitter_never_pushes_the_delay_past_the_cap():
+    assert all(backoff_due(50, TS, cap_s=900.0) <= TS + timedelta(seconds=900)
+               for _ in range(200))
+
+
+def test_throttled_work_returns_sooner_than_failed_work():
+    """Being inside our own rate budget is not a failure and must not be
+    punished like one: at six attempts, failure backoff is minutes."""
+    throttled = throttle_due(TS)
+    failed = backoff_due(6, TS, jitter=0.0)
+    assert throttled < failed
+    assert throttled > TS
+
+
+def test_throttled_retries_are_spread_out():
+    due = {throttle_due(TS) for _ in range(40)}
+    assert len(due) > 30
 
 
 # -------------------------------------------------------------- rate limiter

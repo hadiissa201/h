@@ -363,7 +363,19 @@ def audit_queue(session: Session) -> None:
         print("\n    Depth is SCHEDULED FUTURE WORK, not backlog: every item has a\n"
               "    due_at in the future. Backlog would show as overdue > 0.")
     else:
-        finding("BACKLOG", f"{overdue} items are past due -- workers are behind.")
+        throttled = session.scalar(
+            select(func.count()).select_from(WorkItem)
+            .where(WorkItem.last_error.like("%rate limited%"))) or 0
+        if throttled >= overdue * 0.8:
+            finding("BACKLOG",
+                    f"{overdue} items are past due and {throttled} of them are "
+                    f"waiting on our own rate budget rather than failing. Run "
+                    f"why_behind.py: if they share one attempt count, it is a "
+                    f"retry herd, not a capacity problem.")
+        else:
+            finding("BACKLOG",
+                    f"{overdue} items are past due ({throttled} rate limited). "
+                    f"Run why_behind.py to separate capacity from failure.")
 
     stuck = session.scalar(select(func.count()).select_from(WorkItem)
                            .where(WorkItem.attempts >= 5))

@@ -46,13 +46,15 @@ def main() -> int:
         for kind, n in by_kind.most_common():
             print(f"    {kind:10} {n:>6}")
 
-        # The decisive split. Attempts at zero means the item has never been
-        # tried: the workers simply have not reached it, so there is too much
-        # work. Attempts above zero means it is being tried and failing, and
-        # the error says what is actually broken.
-        never_tried = sum(1 for _, a, _, _ in overdue if not a)
-        failing = len(overdue) - never_tried
+        # Three causes, three different fixes, and they are easy to confuse:
+        # work nobody has reached (too much work), work held back by our own
+        # rate budget (not broken at all), and work that genuinely errors.
+        throttled = sum(1 for _, _, e, _ in overdue if e and "rate limited" in e)
+        never_tried = sum(1 for _, a, e, _ in overdue
+                          if not a and not (e and "rate limited" in e))
+        failing = len(overdue) - never_tried - throttled
         print(f"\n  never attempted (workers behind):  {never_tried:>6}")
+        print(f"  waiting on our own rate budget:    {throttled:>6}")
         print(f"  attempted and failing:             {failing:>6}")
 
         if failing:
@@ -70,7 +72,12 @@ def main() -> int:
               f"worst {lateness[-1]/3600:,.1f} h")
 
         print("\n  " + "-" * 66)
-        if never_tried > failing:
+        if throttled >= max(never_tried, failing):
+            print("  VERDICT: throttled by our own rate limiter, not broken. If the")
+            print("  items share one attempt count and the lateness is small, this")
+            print("  is a retry herd: refused work returning in lockstep. Jittered")
+            print("  backoff fixes that; collecting less does not.")
+        elif never_tried > failing:
             print("  VERDICT: too much work for the workers. Lower sample_rate or")
             print("  raise the worker count. Collecting less will help.")
         else:

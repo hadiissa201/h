@@ -55,6 +55,9 @@ class WorkResult:
     ok: bool
     detail: str = ""
     requeue: bool = True
+    # Rate limited rather than broken. Scheduled separately and does not count
+    # against the item's attempt budget.
+    throttled: bool = False
 
 
 def _rate_limited(limiters: Limiters, service: str) -> bool:
@@ -75,7 +78,7 @@ def observe_market(session: Session, client: httpx.Client, limiters: Limiters,
     """One market+liquidity snapshot. Records the no-pairs state as data."""
     if _rate_limited(limiters, "dexscreener"):
         # Not a failure of the token -- a failure of our budget. Requeue.
-        return WorkResult(False, "rate limited, requeued")
+        return WorkResult(False, "rate limited, requeued", throttled=True)
 
     fetched = fetch_dexscreener(client, token.address, settings.dexscreener_base)
     _note_429(limiters, "dexscreener", fetched.http_status)
@@ -193,7 +196,7 @@ def simulate_exit(session: Session, client: httpx.Client, limiters: Limiters,
     last = "no sizes"
     for notional in sizes:
         if _rate_limited(limiters, "jupiter"):
-            return WorkResult(False, "rate limited, requeued")
+            return WorkResult(False, "rate limited, requeued", throttled=True)
 
         amount_raw, size_is_real = _amount_for_notional(session, token, notional)
         params = {"inputMint": token.address, "outputMint": WSOL_MINT,
@@ -378,7 +381,7 @@ def observe_holders(session: Session, client: httpx.Client, limiters: Limiters,
     most need to keep.
     """
     if _rate_limited(limiters, "helius"):
-        return WorkResult(False, "rate limited, requeued")
+        return WorkResult(False, "rate limited, requeued", throttled=True)
     now = datetime.now(UTC)
     try:
         resp = client.post(settings.rpc_url, json={

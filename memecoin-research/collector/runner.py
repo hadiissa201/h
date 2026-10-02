@@ -40,7 +40,13 @@ from collector.models import (
 )
 from collector.ratelimit import Limiters, build_limiters
 from collector.sampling import sample_score, should_track
-from collector.schedule import WorkKind, backoff_due, capacity, next_due
+from collector.schedule import (
+    WorkKind,
+    backoff_due,
+    capacity,
+    next_due,
+    throttle_due,
+)
 from collector.workers import observe_holders, observe_market, simulate_exit
 from poc.store import close_gap, insert_event, open_gap, upsert_token
 from probe.checks_http import resolve_mint_from_signature
@@ -64,7 +70,8 @@ class Collector:
         self.run_id: int | None = None
         self.started_at = time.time()
         self.stats = {"detected": 0, "admitted": 0, "skipped_by_sampling": 0,
-                      "mint_unresolved": 0, "work_done": 0, "work_failed": 0}
+                      "mint_unresolved": 0, "work_done": 0, "work_failed": 0,
+                      "work_throttled": 0}
         self._detector: LaunchDetector | None = None
         self._client = httpx.Client(
             follow_redirects=True, timeout=settings.http_timeout_s,
@@ -307,6 +314,15 @@ class Collector:
                                  detail={"reason": "max_age", "work": kind.value})
                 else:
                     fresh.due_at = due
+            elif result.throttled:
+                # Throttled, not broken. Come back soon, with heavy jitter so a
+                # refused batch does not return as a batch, and leave `attempts`
+                # alone: staying inside our own budget is not a failure of the
+                # work item, and counting it as one drove exponential backoff
+                # on perfectly healthy work.
+                fresh.last_error = result.detail[:500]
+                fresh.due_at = throttle_due()
+                self.stats["work_throttled"] += 1
             else:
                 fresh.attempts += 1
                 fresh.last_error = result.detail[:500]

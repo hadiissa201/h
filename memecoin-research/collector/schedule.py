@@ -13,6 +13,7 @@ compensate; there is no third option.
 
 from __future__ import annotations
 
+import random
 from datetime import UTC, datetime, timedelta
 from enum import Enum
 
@@ -80,16 +81,44 @@ def next_due(settings, kind: WorkKind, detected_ts: datetime,  # noqa: ANN001
 
 
 def backoff_due(attempts: int, now: datetime | None = None,
-                base_s: float = 5.0, cap_s: float = 900.0) -> datetime:
-    """Exponential backoff for work that failed.
+                base_s: float = 5.0, cap_s: float = 900.0,
+                jitter: float = 0.3) -> datetime:
+    """Exponential backoff for work that failed, with jitter.
 
     Failed work is rescheduled, never dropped. A task that keeps failing stays
     in the queue with its attempt count visible, because a silently abandoned
     task and a silently missing observation are the same hole in the data.
+
+    The jitter is not decoration. Without it this function was deterministic,
+    so every item refused in the same instant with the same attempt count got
+    the SAME retry time. They then stampeded the rate limiter together, all but
+    one were refused again, and every one of them incremented to the same
+    attempt count -- a self-sustaining herd. It showed up in production as 140
+    overdue items sitting at exactly 6 attempts, which is not what independent
+    failures look like.
     """
     now = now or datetime.now(UTC)
     delay = min(cap_s, base_s * (2 ** max(0, attempts - 1)))
-    return now + timedelta(seconds=delay)
+    if jitter:
+        delay *= 1.0 + random.uniform(-jitter, jitter)
+    # Clamped after jitter: a ceiling the jitter can exceed is not a ceiling.
+    return now + timedelta(seconds=min(cap_s, max(1.0, delay)))
+
+
+def throttle_due(now: datetime | None = None, base_s: float = 10.0,
+                 jitter: float = 0.8) -> datetime:
+    """When to retry work that was rate limited rather than failed.
+
+    Being throttled is not a failure of the work item -- it is us staying
+    inside a budget we chose. Treating it as a failure drove exponential
+    backoff and tripped the "failed 5+ times" alarm on healthy work.
+
+    So throttled work comes back soon, and with heavy jitter, because spreading
+    a refused batch across time is the entire point.
+    """
+    now = now or datetime.now(UTC)
+    delay = base_s * (1.0 + random.uniform(-jitter, jitter))
+    return now + timedelta(seconds=max(1.0, delay))
 
 
 def estimated_calls_per_token(settings) -> dict[str, int]:  # noqa: ANN001
