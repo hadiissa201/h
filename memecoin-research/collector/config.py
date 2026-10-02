@@ -60,18 +60,20 @@ class CollectorSettings(BaseSettings):
     # would need ~20x the budget. Sampling is deterministic on the mint address
     # so it is reproducible, unbiased, and recorded per token: Phase 2 can
     # weight correctly, which "keep whatever we could keep up with" never allows.
-    # Raised from 0.05 after measuring the real ceilings on live data: exit
-    # simulation was using 1.2 of Jupiter's ~120 requests per minute, with zero
-    # queue backlog, so collection was slow by choice rather than by limit. At
-    # 0.15 the project reaches a usable sample in about five days instead of
-    # fifteen. Mixing rates is safe because sample_rate_at_detection is stored
-    # per token, so a later analysis can weight the periods correctly -- which
-    # is the whole reason that column exists.
+    # Back to 0.05 after 0.15 produced 1,727 overdue work items in two days,
+    # 211 collection gaps and a drop in detections from ~4,800/day to ~970/day.
     #
-    # Lower this if the audit starts reporting overdue queue items or the logs
-    # show sustained 429s: a rate that outruns the workers loses data, and lost
-    # data is worse than slow data.
-    sample_rate: float = Field(default=0.15, gt=0, le=1.0)
+    # The reasoning that justified 0.15 was wrong, and the mistake is worth
+    # recording. I measured Jupiter usage at 1.2 requests per minute and called
+    # it 1% of the ceiling, but that was the rate the four workers ACHIEVED,
+    # not the rate the schedule DEMANDED. Measuring supply and treating it as
+    # demand says nothing about headroom.
+    #
+    # 0.05 ran for three days with an empty queue, so it is known-good. Do not
+    # raise it again without first establishing what the queue's real
+    # bottleneck is -- why_behind.py separates "workers saturated" from "work
+    # failing", which need opposite fixes.
+    sample_rate: float = Field(default=0.05, gt=0, le=1.0)
     max_tracked_tokens: int = Field(default=40_000, gt=0)
 
     # -------------------------------------------------------------- cadence
