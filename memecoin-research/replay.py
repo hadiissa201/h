@@ -63,6 +63,9 @@ class ReplayPosition:
     blocked_no_route: int = 0
     blocked_our_fault: int = 0
     peak_multiple: float = 1.0
+    exit_impact: float = 0.0
+    costs_gross: float = 0.0
+    floored: bool = False
 
 
 @dataclass
@@ -71,6 +74,9 @@ class ReplayResult:
     closed: list[ReplayPosition] = field(default_factory=list)
     still_open: int = 0
     never_entered: int = 0
+    # Which gate turned each token away. 8 entries from 241 tokens is either a
+    # strict filter or a broken one, and the counts say which.
+    rejected: dict[str, int] = field(default_factory=lambda: defaultdict(int))
 
     @property
     def wins(self) -> int:
@@ -93,6 +99,25 @@ class ReplayResult:
         se = (var / n) ** 0.5
         return (mean - 1.96 * se, mean + 1.96 * se)
 
+    @property
+    def floored(self) -> int:
+        return sum(1 for p in self.closed if p.floored)
+
+    def impact_summary(self) -> str:
+        """Entry and exit impact actually used, so an absurd figure is visible.
+
+        A $100 order in a funded pool cannot move the price 100%. When it says
+        it did, the quote behind it was for a different trade -- and the audit
+        found 1,121 stored quotes claiming exactly that.
+        """
+        if not self.closed:
+            return "no closed positions"
+        entries = sorted(p.entry_impact for p in self.closed)
+        exits = sorted(p.exit_impact for p in self.closed)
+        mid = len(entries) // 2
+        return (f"entry impact median {entries[mid]:.1%} (max {entries[-1]:.1%}), "
+                f"exit impact median {exits[mid]:.1%} (max {exits[-1]:.1%})")
+
     def reasons(self) -> dict[str, int]:
         counts: dict[str, int] = defaultdict(int)
         for position in self.closed:
@@ -105,18 +130,22 @@ def _aware(moment: datetime) -> datetime:
 
 
 def replay_token(session: Session, token: Token, strategy: Strategy,
-                 settings) -> tuple[ReplayPosition | None, bool]:  # noqa: ANN001
+                 settings,  # noqa: ANN001
+                 gates: dict[str, int] | None = None,
+                 ) -> tuple[ReplayPosition | None, bool]:
     """Walk one token's observations once, as the live trader would have.
 
     Returns (position, entered). A position with no exit_ts never found a
     sellable moment while its exit rule was firing -- which is a result, not a
     gap, and is counted rather than dropped.
     """
+    gates = gates if gates is not None else defaultdict(int)
     rows = session.scalars(
         select(Observation)
         .where(Observation.token_id == token.id, Observation.price_usd.is_not(None))
         .order_by(Observation.observed_ts)).all()
     if len(rows) < 2:
+        gates["too_few_observations"] += 1
         return None, False
 
     detected = _aware(token.detected_ts)
@@ -135,17 +164,22 @@ def replay_token(session: Session, token: Token, strategy: Strategy,
         if position is None:
             # ---- entry, using only what was visible at `moment`
             if age > strategy.max_age_s or age < strategy.min_age_s:
+                gates["age"] += 1
                 continue
             if not (strategy.min_liquidity_usd <= liquidity
                     <= strategy.max_liquidity_usd):
+                gates["liquidity_band"] += 1
                 continue
             if liquidity <= 0 or strategy.notional_usd > liquidity * MAX_POOL_FRACTION:
+                gates["order_too_big_for_pool"] += 1
                 continue
             if (obs.buys_5m or 0) < strategy.min_buys_5m:
+                gates["too_few_buys"] += 1
                 continue
             budget = verdict_age_budget(settings, strategy, age)
             proven = exit_available(session, token.id, moment, budget)
             if strategy.require_proven_exit and proven is None:
+                gates["no_proven_exit"] += 1
                 continue
             impact = (min(1.0, abs(float(proven.price_impact_pct or 0.0)))
                       if proven is not None else 0.0)
@@ -184,8 +218,14 @@ def replay_token(session: Session, token: Token, strategy: Strategy,
         fees = notional * strategy.round_trip_cost_pct
         costs = (fees + notional * position.entry_impact
                  + max(0.0, notional + gross) * exit_impact)
+        position.exit_impact = exit_impact
+        position.costs_gross = costs
         if gross - costs < -notional:
+            # The stake is the most that can be lost. Hitting this means the
+            # modelled costs exceeded the position -- which is a statement
+            # about the cost inputs, not about the trade.
             costs = gross + notional
+            position.floored = True
         position.exit_ts, position.exit_price, position.reason = moment, price, reason
         position.gross, position.costs = gross, costs
         position.net = gross - costs
@@ -233,7 +273,8 @@ def main() -> int:
         for strategy in chosen:
             result = ReplayResult(strategy=strategy.name)
             for token in tokens:
-                position, entered = replay_token(session, token, strategy, settings)
+                position, entered = replay_token(session, token, strategy,
+                                                 settings, result.rejected)
                 if not entered or position is None:
                     result.never_entered += 1
                 elif position.exit_ts is None:
@@ -242,7 +283,7 @@ def main() -> int:
                     result.closed.append(position)
             results[strategy.name] = result
 
-    print(f"{'strategy':<14}{'closed':>8}{'stuck':>7}{'wins':>6}"
+    print(f"{'strategy':<14}{'closed':>8}{'stuck':>7}{'wins':>6}{'floored':>9}"
           f"{'mean':>10}{'95% CI':>22}")
     for name, result in results.items():
         mean = result.mean_return_pct
@@ -251,11 +292,38 @@ def main() -> int:
         ci_txt = ("                 n/a" if ci is None
                   else f"[{ci[0] * 100:+7.2f}%, {ci[1] * 100:+7.2f}%]")
         print(f"{name:<14}{len(result.closed):>8}{result.still_open:>7}"
-              f"{result.wins:>6}{mean_txt:>10}{ci_txt:>22}")
+              f"{result.wins:>6}{result.floored:>9}{mean_txt:>10}{ci_txt:>22}")
+
+    # A mean of exactly -100% with no spread is the floor, not a return.
+    saturated = [n for n, r in results.items()
+                 if r.closed and r.floored == len(r.closed)]
+    if saturated:
+        print(f"\n  NOT A RESULT: every closed position hit the loss floor for "
+              f"{', '.join(saturated)}.")
+        print("  A mean of -100% with a zero-width interval means the modelled")
+        print("  costs exceeded the stake on every trade, so the floor set the")
+        print("  answer and the strategy never did. Read the impacts below: a")
+        print("  $100 order cannot move a funded pool 100%, and when the stored")
+        print("  quote says it did, that quote was for a different trade.")
+
+    print("\ncost inputs")
+    for name, result in results.items():
+        print(f"  {name:<14}{result.impact_summary()}")
 
     print("\nexit reasons")
     for name, result in results.items():
         print(f"  {name:<14}{result.reasons()}")
+
+    # Entry rate matters: a strategy that almost never trades has not been
+    # tested, however good the few trades look.
+    print("\nwhy tokens never produced a position (observation-level counts)")
+    control = results[next(iter(results))]
+    total = len(control.closed) + control.still_open + control.never_entered
+    entered = len(control.closed) + control.still_open
+    print(f"  entered {entered} of {total} tokens "
+          f"({entered / total * 100:.1f}%)" if total else "  no tokens")
+    for gate, n in sorted(control.rejected.items(), key=lambda kv: -kv[1]):
+        print(f"    {gate:<28}{n:>8}")
 
     print("\n  A mean whose interval spans zero is not a result. The sniper")
     print("  test showed two IDENTICAL distributions producing a 9.5pp gap at")
