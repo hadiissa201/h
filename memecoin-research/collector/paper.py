@@ -451,6 +451,45 @@ def _structural_ok(session: Session, token: Token, strategy: Strategy) -> bool:
     return rate is not None and rate <= strategy.max_creator_death_rate
 
 
+def exit_trigger(strategy: Strategy, multiple: float, held_s: float,
+                 trend_broken: bool) -> str | None:
+    """Which exit rule fires, if any. Pure: no session, no clock, no I/O.
+
+    Extracted so the live trader and any historical replay decide identically.
+    A replay carrying its own copy of this ladder would drift from the running
+    rule, and then it would be measuring itself rather than the strategy.
+
+    Order matters and is deliberate. Take-profit and stop-loss come first
+    because they are price levels that were already crossed; the trend rule and
+    the time stop are weaker conditions that should not pre-empt them.
+    """
+    if multiple >= strategy.take_profit_multiple:
+        return "take_profit"
+    if multiple <= strategy.stop_loss_multiple:
+        return "stop_loss"
+    if trend_broken:
+        return "trend_exit"
+    if held_s >= strategy.time_stop_s:
+        return "time_stop"
+    return None
+
+
+def trend_broken_from_prices(strategy: Strategy, prices: list[float],
+                             price: float, held_s: float) -> bool:
+    """The trend test over an explicit price list, for replay.
+
+    Shares its rules with the live path by construction: the live version reads
+    the window from the database and then calls this.
+    """
+    if strategy.trend_window_s <= 0 or held_s < strategy.trend_grace_s:
+        return False
+    usable = [p for p in prices if p and p > 0]
+    if len(usable) < strategy.trend_min_points:
+        return False
+    average = sum(usable) / len(usable)
+    return average > 0 and price < average
+
+
 def _trend_broken(session: Session, position: PaperPosition, strategy: Strategy,
                   moment: datetime, price: float, held_s: float) -> bool:
     """Has price fallen below its own trailing average over the window?
@@ -472,15 +511,10 @@ def _trend_broken(session: Session, position: PaperPosition, strategy: Strategy,
                Observation.observed_ts <= moment,
                Observation.observed_ts >= since,
                Observation.price_usd.is_not(None))).all()
-    usable = [float(p) for p in prices if p and float(p) > 0]
-    if len(usable) < strategy.trend_min_points:
-        # Not enough history inside the window to form an average. Returning
-        # False keeps the position open on OUR sampling gap rather than
-        # inventing a signal from two points.
-        return False
-
-    average = sum(usable) / len(usable)
-    return average > 0 and price < average
+    # Not enough history inside the window returns False, keeping the position
+    # open on OUR sampling gap rather than inventing a signal from two points.
+    return trend_broken_from_prices(
+        strategy, [float(p) for p in prices if p], price, held_s)
 
 
 def manage_position(session: Session, position: PaperPosition,
@@ -533,15 +567,10 @@ def manage_position(session: Session, position: PaperPosition,
         opened = opened.replace(tzinfo=UTC)
     held_s = (moment - opened).total_seconds()
 
-    reason = None
-    if multiple >= strategy.take_profit_multiple:
-        reason = "take_profit"
-    elif multiple <= strategy.stop_loss_multiple:
-        reason = "stop_loss"
-    elif _trend_broken(session, position, strategy, moment, price, held_s):
-        reason = "trend_exit"
-    elif held_s >= strategy.time_stop_s:
-        reason = "time_stop"
+    reason = exit_trigger(
+        strategy, multiple, held_s,
+        trend_broken=_trend_broken(session, position, strategy, moment,
+                                   price, held_s))
     if reason is None:
         return None
 
