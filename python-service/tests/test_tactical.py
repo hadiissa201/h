@@ -195,16 +195,32 @@ def test_a_sharpe_comes_with_an_interval():
 
 
 def test_a_shorter_sample_gives_a_wider_sharpe_interval():
-    """The whole reason to report it: fewer cycles, less certainty."""
-    long_run = run_tactical(
-        {"X": monthly_series([100.0 * (1.02 ** i) for i in range(130)])},
-        annual_yield=Decimal("0.04"))
-    short_run = run_tactical(
-        {"X": monthly_series([100.0 * (1.02 ** i) for i in range(28)])},
-        annual_yield=Decimal("0.04"))
+    """The whole reason to report it: fewer cycles, less certainty.
+
+    Both series repeat the SAME monthly return pattern, so their Sharpe ratios
+    match and only the length differs. Comparing two runs with different Sharpe
+    ratios would not test this, because the standard error depends on both.
+    """
+    def repeating(cycles: int) -> list[float]:
+        pattern = [1.06, 1.04, 0.97, 1.08, 1.02, 0.95,
+                   1.07, 1.03, 0.99, 1.05, 1.01, 0.96]
+        price, out = 100.0, [100.0]
+        for _ in range(cycles):
+            for step in pattern:
+                price *= step
+                out.append(price)
+        return out
+
+    long_run = run_tactical({"X": monthly_series(repeating(12))},
+                            annual_yield=Decimal("0.04"))
+    short_run = run_tactical({"X": monthly_series(repeating(3))},
+                             annual_yield=Decimal("0.04"))
+    assert long_run.months > short_run.months * 2
+
     long_low, long_high = long_run.sharpe_interval(Decimal("0.04"))
     short_low, short_high = short_run.sharpe_interval(Decimal("0.04"))
-    assert (float(short_high) - float(short_low)) > (float(long_high) - float(long_low))
+    assert (float(short_high) - float(short_low)) > (float(long_high) - float(long_low)), (
+        "a shorter sample reported no more uncertainty than a longer one")
 
 
 def test_no_interval_when_the_window_is_too_short_to_annualise():
