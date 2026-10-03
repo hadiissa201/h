@@ -24,6 +24,7 @@ from collector.models import (
 )
 from collector.paper import (
     Strategy,
+    _trend_broken,
     consider_entry,
     exit_available,
     manage_position,
@@ -874,3 +875,168 @@ def test_the_gate_scales_with_order_size_not_a_fixed_dollar_floor(session):
                      round_trip_cost_pct=0.01)
     assert consider_entry(session, token, big) is False
     assert consider_entry(session, token, small) is True
+
+
+# ------------------------------------------------- the trend-exit experiment
+def trend_strategy(window: float = 300.0, grace: float = 60.0) -> Strategy:
+    return Strategy(name="t", max_age_s=1800, min_liquidity_usd=5_000,
+                    min_buys_5m=5, take_profit_multiple=3.0,
+                    stop_loss_multiple=0.5, time_stop_s=36_000,
+                    notional_usd=100.0, round_trip_cost_pct=0.01,
+                    trend_window_s=window, trend_grace_s=grace,
+                    trend_min_points=3)
+
+
+def test_a_position_exits_when_price_falls_below_its_trailing_average(session):
+    token = make_token(session)
+    strategy = trend_strategy()
+    observe(session, token, TS + timedelta(seconds=30), 0.001)
+    can_sell(session, token, TS + timedelta(seconds=30))
+    consider_entry(session, token, strategy)
+    session.commit()
+    position = session.scalar(select(PaperPosition))
+
+    # Rise, then roll over -- a gradual decline, not a one-block rug.
+    for offset, price in ((90, 0.0014), (120, 0.0016), (150, 0.0015)):
+        observe(session, token, TS + timedelta(seconds=offset), price)
+    at = TS + timedelta(seconds=180)
+    observe(session, token, at, 0.0010)        # below the 5-minute average
+    can_sell(session, token, at)
+    session.commit()
+
+    assert manage_position(session, position, strategy) == "trend_exit"
+    assert position.is_open is False
+
+
+def test_the_trend_rule_is_off_when_the_window_is_zero(session):
+    """The control arm must behave exactly as before."""
+    token = make_token(session)
+    strategy = trend_strategy(window=0.0)
+    observe(session, token, TS + timedelta(seconds=30), 0.001)
+    can_sell(session, token, TS + timedelta(seconds=30))
+    consider_entry(session, token, strategy)
+    session.commit()
+    position = session.scalar(select(PaperPosition))
+
+    for offset, price in ((90, 0.0014), (120, 0.0016), (150, 0.0015)):
+        observe(session, token, TS + timedelta(seconds=offset), price)
+    at = TS + timedelta(seconds=180)
+    observe(session, token, at, 0.0010)
+    can_sell(session, token, at)
+    session.commit()
+
+    assert manage_position(session, position, strategy) is None
+    assert position.is_open is True
+
+
+def test_the_grace_period_stops_the_launch_whipsaw_closing_everything(session):
+    """Without it this measures the grace period, not the trend."""
+    token = make_token(session)
+    strategy = trend_strategy(grace=600.0)
+    observe(session, token, TS + timedelta(seconds=30), 0.001)
+    can_sell(session, token, TS + timedelta(seconds=30))
+    consider_entry(session, token, strategy)
+    session.commit()
+    position = session.scalar(select(PaperPosition))
+
+    for offset, price in ((40, 0.0015), (50, 0.0016)):
+        observe(session, token, TS + timedelta(seconds=offset), price)
+    at = TS + timedelta(seconds=60)
+    observe(session, token, at, 0.0009)
+    can_sell(session, token, at)
+    session.commit()
+
+    assert manage_position(session, position, strategy) is None, (
+        "exited inside the grace period")
+
+
+def test_too_few_observations_in_the_window_is_not_an_average(session):
+    """Our sampling gap must not be read as a trend signal."""
+    token = make_token(session)
+    strategy = trend_strategy()
+    observe(session, token, TS + timedelta(seconds=30), 0.001)
+    can_sell(session, token, TS + timedelta(seconds=30))
+    consider_entry(session, token, strategy)
+    session.commit()
+    position = session.scalar(select(PaperPosition))
+
+    at = TS + timedelta(seconds=200)
+    observe(session, token, at, 0.0009)       # two points in the window total
+    can_sell(session, token, at)
+    session.commit()
+    assert manage_position(session, position, strategy) is None
+
+
+def test_a_single_block_rug_is_not_caught_by_the_average(session):
+    """The objection recorded in advance, pinned as a test.
+
+    A moving average lags by construction. The characteristic memecoin failure
+    is liquidity pulled in one block, and the price gaps straight through the
+    stop. The trend rule cannot fire first -- the stop does -- and no window
+    setting changes that. This test exists so the limitation stays visible
+    rather than being discovered later as a surprise.
+    """
+    token = make_token(session)
+    strategy = trend_strategy()
+    observe(session, token, TS + timedelta(seconds=30), 0.001)
+    can_sell(session, token, TS + timedelta(seconds=30))
+    consider_entry(session, token, strategy)
+    session.commit()
+    position = session.scalar(select(PaperPosition))
+
+    for offset, price in ((90, 0.0011), (120, 0.0012), (150, 0.0011)):
+        observe(session, token, TS + timedelta(seconds=offset), price)
+    at = TS + timedelta(seconds=180)
+    observe(session, token, at, 0.00002)      # -98% in one observation
+    can_sell(session, token, at)
+    session.commit()
+
+    # The stop fires, not the trend rule: by the time the average notices, the
+    # position is already far through the stop level.
+    assert manage_position(session, position, strategy) == "stop_loss"
+
+
+def test_the_trend_exit_still_requires_a_real_exit_route(session):
+    """No exit rule may bypass the sellability check. That check is the point
+    of the entire project."""
+    token = make_token(session)
+    strategy = trend_strategy()
+    observe(session, token, TS + timedelta(seconds=30), 0.001)
+    can_sell(session, token, TS + timedelta(seconds=30))
+    consider_entry(session, token, strategy)
+    session.commit()
+    position = session.scalar(select(PaperPosition))
+
+    for offset, price in ((90, 0.0014), (120, 0.0016), (150, 0.0015)):
+        observe(session, token, TS + timedelta(seconds=offset), price)
+    at = TS + timedelta(seconds=180)
+    observe(session, token, at, 0.0010)
+    cannot_sell(session, token, at)           # the market says no
+    session.commit()
+
+    assert manage_position(session, position, strategy) is None
+    assert position.is_open is True
+    assert position.blocked_no_route >= 1
+
+
+def test_the_trend_rule_never_sees_a_future_price(session):
+    """An average that includes later observations is look-ahead."""
+    token = make_token(session)
+    strategy = trend_strategy()
+    observe(session, token, TS + timedelta(seconds=30), 0.001)
+    can_sell(session, token, TS + timedelta(seconds=30))
+    consider_entry(session, token, strategy)
+    session.commit()
+    position = session.scalar(select(PaperPosition))
+
+    for offset, price in ((90, 0.0011), (120, 0.0012)):
+        observe(session, token, TS + timedelta(seconds=offset), price)
+    at = TS + timedelta(seconds=150)
+    observe(session, token, at, 0.00115)
+    can_sell(session, token, at)
+    # A much later crash exists in the table but is after `at`.
+    observe(session, token, TS + timedelta(seconds=900), 0.00001)
+    session.commit()
+
+    assert _trend_broken(session, position, strategy, at, 0.00115,
+                         held_s=120.0) is False

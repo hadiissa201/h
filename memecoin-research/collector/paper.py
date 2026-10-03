@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -60,7 +60,25 @@ class Strategy:
     max_creator_death_rate: float | None = None   # None = do not look
     min_creator_prior_tokens: int = 0      # history needed before judging
 
-    # ---- exit
+    # ---- exit: trend following, applied at memecoin timescale
+    # Hold while price is above its own trailing average; exit when it drops
+    # below. An adaptive exit rather than a fixed threshold, so a run is not
+    # capped at the take-profit multiple.
+    #
+    # The honest objection, recorded because it may well be the answer: a
+    # moving average is lagging by construction, and the characteristic
+    # memecoin failure is liquidity removed in a SINGLE block. No average can
+    # exit ahead of that; it can only report it afterwards. This should help
+    # against a slow bleed and do nothing at all against a rug.
+    #
+    # The window is in SECONDS, not in observations. Our cadence runs from 10s
+    # early to 4h late, so a fixed count of observations would span minutes for
+    # one position and days for another, and the rule would not be the same
+    # rule across the sample.
+    trend_window_s: float = 0.0          # 0 = do not use a trend exit
+    trend_min_points: int = 3            # too few points is not an average
+    trend_grace_s: float = 60.0          # ignore the launch-minute whipsaw
+
     take_profit_multiple: float = 3.0    # +200%
     stop_loss_multiple: float = 0.5      # -50%
     time_stop_s: float = 3600.0          # give up after an hour
@@ -162,7 +180,48 @@ STRUCTURAL_STRATEGIES = (
              min_creator_prior_tokens=2),
 )
 
-ALL_STRATEGIES = DEFAULT_STRATEGIES + SNIPER_STRATEGIES + STRUCTURAL_STRATEGIES
+# --------------------------------------------- the trend-exit experiment
+#
+# A MATCHED TRIPLET. Identical entry, identical take-profit, stop and time
+# stop. The ONLY difference is whether the position also exits when price falls
+# below its own trailing average, and over what window. Any difference in
+# outcome is attributable to the exit rule and nothing else.
+#
+# This is trend following applied at memecoin timescale, which is NOT Faber's
+# anomaly: there are no multi-year regimes in a token that lives for hours,
+# only a launch, a pump and a terminal event. What it does test is whether an
+# ADAPTIVE exit beats a fixed threshold, which every strategy above uses. An
+# adaptive exit can ride a run past +200% instead of capping there, and can
+# leave a slow bleed before the -50% stop.
+#
+# The reason to expect nothing: a moving average lags by construction and the
+# characteristic failure here is liquidity pulled in one block. No average
+# exits ahead of that. Against a gradual decline it may help; against a rug it
+# cannot. Recorded in advance so a null result is not reinterpreted later.
+#
+# And it cannot help with the finding that actually dominates: positions up
+# 6.02x with no exit route. A better signal for WHEN to sell is worth nothing
+# when there is no WAY to sell.
+_TREND_COMMON = dict(
+    max_age_s=1800, min_liquidity_usd=0.0, min_buys_5m=0,
+    take_profit_multiple=3.0, stop_loss_multiple=0.5, time_stop_s=3600,
+    notional_usd=100.0,
+)
+
+TREND_STRATEGIES = (
+    # The control for this triplet: fixed exits only, no trend rule. Separate
+    # from control_any so the comparison is not contaminated by control_any's
+    # different entry window.
+    Strategy(name="fixed_only", trend_window_s=0.0, **_TREND_COMMON),
+    # Five minutes of trailing average: fast enough to react within the window
+    # where most of these tokens live and die.
+    Strategy(name="trend_5m", trend_window_s=300.0, **_TREND_COMMON),
+    # Thirty minutes: slower, so it rides further but gives back more.
+    Strategy(name="trend_30m", trend_window_s=1800.0, **_TREND_COMMON),
+)
+
+ALL_STRATEGIES = (DEFAULT_STRATEGIES + SNIPER_STRATEGIES
+                  + STRUCTURAL_STRATEGIES + TREND_STRATEGIES)
 
 
 def latest_observation(session: Session, token_id: int) -> Observation | None:
@@ -392,6 +451,38 @@ def _structural_ok(session: Session, token: Token, strategy: Strategy) -> bool:
     return rate is not None and rate <= strategy.max_creator_death_rate
 
 
+def _trend_broken(session: Session, position: PaperPosition, strategy: Strategy,
+                  moment: datetime, price: float, held_s: float) -> bool:
+    """Has price fallen below its own trailing average over the window?
+
+    Uses only observations at or before `moment`, so the rule never sees a
+    price it could not have seen. The grace period exists because the first
+    seconds after launch whipsaw hard enough to trip any average immediately,
+    which would make this a test of the grace period rather than of the trend.
+    """
+    if strategy.trend_window_s <= 0:
+        return False
+    if held_s < strategy.trend_grace_s:
+        return False
+
+    since = moment - timedelta(seconds=strategy.trend_window_s)
+    prices = session.scalars(
+        select(Observation.price_usd)
+        .where(Observation.token_id == position.token_id,
+               Observation.observed_ts <= moment,
+               Observation.observed_ts >= since,
+               Observation.price_usd.is_not(None))).all()
+    usable = [float(p) for p in prices if p and float(p) > 0]
+    if len(usable) < strategy.trend_min_points:
+        # Not enough history inside the window to form an average. Returning
+        # False keeps the position open on OUR sampling gap rather than
+        # inventing a signal from two points.
+        return False
+
+    average = sum(usable) / len(usable)
+    return average > 0 and price < average
+
+
 def manage_position(session: Session, position: PaperPosition,
                     strategy: Strategy, settings=None) -> str | None:  # noqa: ANN001
     """Update a live position; close it only if an exit genuinely existed."""
@@ -447,6 +538,8 @@ def manage_position(session: Session, position: PaperPosition,
         reason = "take_profit"
     elif multiple <= strategy.stop_loss_multiple:
         reason = "stop_loss"
+    elif _trend_broken(session, position, strategy, moment, price, held_s):
+        reason = "trend_exit"
     elif held_s >= strategy.time_stop_s:
         reason = "time_stop"
     if reason is None:
