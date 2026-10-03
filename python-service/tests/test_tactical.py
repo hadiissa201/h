@@ -183,3 +183,30 @@ def test_an_incomplete_current_month_is_not_treated_as_a_month_end():
 def test_a_series_ending_exactly_on_month_end_keeps_that_month():
     frame = daily([float(i) for i in range(1, 32)])     # all of January
     assert len(monthly_closes(frame)) == 1
+
+
+def test_a_sharpe_comes_with_an_interval():
+    """A point estimate invites confidence eight years of data cannot support."""
+    rising = [100.0 * (1.03 ** i) for i in range(60)]
+    result = run_tactical({"X": monthly_series(rising)}, annual_yield=Decimal("0.04"))
+    low, high = result.sharpe_interval(Decimal("0.04"))
+    point = float(result.sharpe(Decimal("0.04")))
+    assert float(low) < point < float(high)
+
+
+def test_a_shorter_sample_gives_a_wider_sharpe_interval():
+    """The whole reason to report it: fewer cycles, less certainty."""
+    long_run = run_tactical(
+        {"X": monthly_series([100.0 * (1.02 ** i) for i in range(130)])},
+        annual_yield=Decimal("0.04"))
+    short_run = run_tactical(
+        {"X": monthly_series([100.0 * (1.02 ** i) for i in range(28)])},
+        annual_yield=Decimal("0.04"))
+    long_low, long_high = long_run.sharpe_interval(Decimal("0.04"))
+    short_low, short_high = short_run.sharpe_interval(Decimal("0.04"))
+    assert (float(short_high) - float(short_low)) > (float(long_high) - float(long_low))
+
+
+def test_no_interval_when_the_window_is_too_short_to_annualise():
+    result = run_tactical({"X": monthly_series([100.0] * 20)})
+    assert result.sharpe_interval(Decimal("0.04")) is None

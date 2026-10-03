@@ -109,6 +109,23 @@ class TacticalResult:
         var = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
         return to_decimal((var ** 0.5) * (12 ** 0.5))
 
+    def sharpe_interval(self, risk_free_annual: Decimal) -> tuple[Decimal, Decimal] | None:
+        """95% interval for the Sharpe ratio (Lo, 2002: SE = sqrt((1+S^2/2)/T)).
+
+        Reported beside every Sharpe because the point estimate invites a
+        confidence the sample cannot support. Eight years of crypto contains
+        roughly two and a half cycles, so the effective number of independent
+        get-out-and-back-in calls is nearer ten than a hundred -- and at that
+        size a Sharpe of 0.62 and one of 0.46 are the same measurement.
+        """
+        point = self.sharpe(risk_free_annual)
+        if point is None or self.months < 12:
+            return None
+        years = self.months / 12.0
+        s = float(point)
+        se = ((1.0 + s * s / 2.0) / years) ** 0.5
+        return (to_decimal(s - 1.96 * se), to_decimal(s + 1.96 * se))
+
     def sharpe(self, risk_free_annual: Decimal) -> Decimal | None:
         """Excess return over the LENDING rate, not over zero.
 

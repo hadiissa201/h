@@ -78,8 +78,10 @@ def main() -> int:
           f"{timed.months} months tested)")
     head = f"\n{'':<16}{'TOTAL':>10}{'CAGR':>10}{'VOL':>10}{'MAXDD':>10}{'SHARPE':>9}{'IN MKT':>9}"
     print(head)
+    intervals = {}
     for label, run in (("faber timed", timed), ("buy & hold", held)):
         sharpe = run.sharpe(args.lending_apy)
+        intervals[label] = run.sharpe_interval(args.lending_apy)
         print(f"{label:<16}{pct(run.total_return_pct):>10}{pct(run.cagr):>10}"
               f"{pct(run.volatility_pct()):>10}{pct(run.max_drawdown_pct):>10}"
               f"{('   n/a' if sharpe is None else f'{float(sharpe):+8.2f}'):>9}"
@@ -90,6 +92,18 @@ def main() -> int:
     lend_total = Decimal(str((1.0 + float(args.lending_apy)) ** years - 1.0))
     print(f"{'lend only':<16}{pct(lend_total):>10}{pct(args.lending_apy):>10}"
           f"{'   0.00%':>10}{'   0.00%':>10}{'     n/a':>9}{'   0.00%':>9}")
+
+    # A Sharpe without its interval invites more confidence than the sample
+    # supports, and these two overlap heavily on any crypto history available.
+    timed_ci, held_ci = intervals.get("faber timed"), intervals.get("buy & hold")
+    if timed_ci and held_ci:
+        print(f"\n  Sharpe 95% intervals over {timed.months / 12:.1f} years:")
+        print(f"    faber timed  [{float(timed_ci[0]):+.2f}, {float(timed_ci[1]):+.2f}]")
+        print(f"    buy & hold   [{float(held_ci[0]):+.2f}, {float(held_ci[1]):+.2f}]")
+        if float(timed_ci[0]) < float(held_ci[1]):
+            print("    These OVERLAP: the return advantage is not distinguishable")
+            print("    from luck at this sample length. The drawdown reduction is the")
+            print("    more credible claim -- it is structural, not a return forecast.")
 
     print("\nROBUSTNESS -- every window, none selected")
     print(f"{'window':<16}{'TOTAL':>10}{'CAGR':>10}{'MAXDD':>10}{'IN MKT':>9}")
