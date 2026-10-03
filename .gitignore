@@ -48,3 +48,8 @@ htmlcov/
 # memecoin research
 /memecoin-research/probe_report.json
 /memecoin-research/*.db
+
+# Cached price history for backtests: reproducible from scripts/, large,
+# and anchored so the rule cannot swallow python-service/app/data.
+/data/history/
+/data/universe/
