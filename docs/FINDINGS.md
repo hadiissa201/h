@@ -414,3 +414,89 @@ The code stays. `scripts/evaluate_tactical.py` against any CSV directory is now
 the cheapest honest test in the repo, and the survivorship check is a reusable
 pattern: run the candidate on assets chosen by a rule available at the time,
 never on the ones that worked out.
+
+---
+
+## Memecoin sniping: the structure is unworkable (2026-10-04)
+
+This is the first result in the project that does not depend on which strategy
+was chosen. It kills all of them at once, and it came from one row in the
+database rather than from a strategy test.
+
+### The measurement
+
+227 closed stop-loss positions. The stop is set at −50% (−30% for `quick_50`).
+Where the exits actually landed:
+
+| strategy | stop set at | median realised exit | n |
+|---|---|---|---|
+| safe_authorities | x0.50 | x0.271 | 32 |
+| control_any | x0.50 | x0.230 | 70 |
+| snipe_asap | x0.50 | x0.214 | 39 |
+| wait_5m | x0.50 | x0.156 | 29 |
+| patient_200 | x0.50 | x0.099 | 13 |
+| quick_50 | **x0.70** | **x0.047** | 18 |
+| early_200 | x0.50 | x0.028 | 22 |
+
+59% of all stop exits landed at or below x0.25 — half the stop level or worse.
+29% landed below x0.01, a near-total loss.
+
+The stop is not failing to fire. It fires at the first price observed after the
+collapse, and for liquidity pulled in a single block that price is near zero.
+No stop level changes this, and observing faster cannot fix it either: one
+block outruns any sampling rate a research collector can sustain.
+
+### Why that makes the structure lose
+
+Gains are capped at the take-profit multiple. Losses are not capped, because
+the stop cannot be enforced. The break-even win rate follows directly:
+
+| strategy | a win pays | a loss actually costs | needs | measured |
+|---|---|---|---|---|
+| control_any | +200% | −77% | 28% | **16%** |
+| early_200 | +200% | −97% | 33% | — |
+| patient_200 | +200% | −90% | 31% | — |
+| quick_50 | +50% | −95% | **66%** | — |
+
+Had the stop held at −50%, `control_any` would need 20% wins rather than 28%.
+It achieved 16%. The gap between 16% and 28% is the whole result: the measured
+−22% returns were never a tuning problem.
+
+**Capping the upside while being unable to cap the downside is selling a
+lottery ticket, not buying one.** Every strategy in the project shared that
+shape, which is why all of them lost by similar amounts.
+
+### The one remaining structure, and why it is also blocked
+
+The obvious fix is to stop capping gains: remove the take-profit, accept that
+most positions go to near zero, and rely on rare large winners. That is the
+actual memecoin playbook, and the arithmetic can work — one 100x pays for
+ninety-nine total losses.
+
+It requires the large winners to be sellable. The collector logged positions at
+**x6.02, x4.34 and x3.03 with no exit route**, and across 17,113 exit checks
+26% found no route at all. The winners are disproportionately the ones that
+cannot be exited, because a token that has run hard is often one whose
+liquidity has already been pulled.
+
+So both halves of the only viable structure are broken: capping gains loses to
+uncappable losses, and uncapping gains runs into unsellability at exactly the
+moment it matters.
+
+### Correction to an earlier claim
+
+I predicted that quotes reporting ≥100% price impact were an artefact of the
+order-sizing bug and would disappear once sizing used the current price. The
+share is flat across that fix — 9.1% on 2026-09-27, 8.9% on 09-30, 9.7% on
+10-03. They are therefore not a sizing artefact for the most part: exit quotes
+run against every tracked token, including pools far too thin to trade, and for
+those a genuine ~100% impact is the correct answer. The sizing bug was real and
+worth fixing; it was not the cause of these.
+
+### What this does not say
+
+It does not say nobody makes money on memecoins. It says that **this structure**
+— detect early, take profit at a multiple, stop out on a drawdown — cannot,
+because the stop is unenforceable and the winners are the hardest to exit.
+Anyone profiting is either exiting inside the same block as their entry, or
+being paid for order flow rather than for direction.

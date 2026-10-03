@@ -97,12 +97,12 @@ def main() -> int:
             .group_by(func.date(SimulatedExit.simulated_ts))
             .order_by(func.date(SimulatedExit.simulated_ts).desc())
             .limit(args.days)).all()
-        total = session.execute(
+        # No limit here: the two queries were limited independently, so a day
+        # present in one and not the other printed a total of 0 and a share of
+        # "-", which reads as missing data rather than as my own join failing.
+        totals = dict(session.execute(
             select(func.date(SimulatedExit.simulated_ts), func.count())
-            .group_by(func.date(SimulatedExit.simulated_ts))
-            .order_by(func.date(SimulatedExit.simulated_ts).desc())
-            .limit(args.days)).all()
-        totals = dict(total)
+            .group_by(func.date(SimulatedExit.simulated_ts))).all())
         if not impossible:
             print("\n  none recorded -- the sizing fix is holding")
         else:
@@ -111,9 +111,16 @@ def main() -> int:
                 whole = totals.get(day, 0)
                 share = f"{count / whole * 100:.1f}%" if whole else "-"
                 print(f"  {str(day):<14}{count:>14,}{whole:>12,}{share:>9}")
-            print("\n  If the most recent days still show these, order sizing is")
-            print("  still wrong for some tokens -- most likely ones whose price")
-            print("  moved far between the observation we size from and the quote.")
+            shares = [c / totals[d] for d, c in impossible if totals.get(d)]
+            if shares and max(shares) - min(shares) < 0.06:
+                print("\n  The share is FLAT across the order-sizing fix, so these are")
+                print("  probably not a sizing artefact: they are pools where $100")
+                print("  really is most of the liquidity. Exit quotes run on every")
+                print("  tracked token, including ones far too thin to trade, so a")
+                print("  genuine ~100% impact is the expected answer for some of them.")
+            else:
+                print("\n  The share moved across the sizing fix, so some of these")
+                print("  were an artefact of sizing orders from a stale price.")
     return 0
 
 
