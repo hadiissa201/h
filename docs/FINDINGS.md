@@ -349,3 +349,68 @@ edge.
 symbol against a 6% bar and `--lending-apy 0` reproduces the old cash floor.
 
 Exact figures will drift as the window moves. The conclusion should not.
+
+---
+
+## Faber asset-class trend following: dead on arrival (2026-10-03)
+
+Tested Faber (2007) as published: monthly, hold an asset while its monthly close
+is above its own 10-month average, otherwise hold stablecoin at 4%. Binance
+daily bars, 100 months, costs charged at 0.3% round trip, no parameter tuning.
+
+**On BTC/ETH/SOL it looked like a real result.** All five windows beat lending,
+and the published window cut max drawdown from −82.9% to −69.8% while returning
+more. For about an hour this was the first positive finding in the project.
+
+**On 16 coins pickable in 2017 it reverses on both claims.**
+
+| basket | timed return | hold return | timed maxDD | hold maxDD |
+|---|---|---|---|---|
+| BTC/ETH/SOL | +2,271% | +1,678% | −69.8% | −82.9% |
+| 16 coins from 2017 | **+112%** | **+169%** | **−85.6%** | **−78.9%** |
+
+Timing lost on return *and* made the drawdown worse. The drawdown reduction —
+which I had argued was the credible half, because it is structural rather than a
+return forecast — changed sign.
+
+Two further signs the first result was noise:
+
+- **Parameter sensitivity exploded.** Total return across the five windows spans
+  4.8x on the winners' basket and **22.6x** on the 2017 basket (+35% at 6 months
+  to +790% at 14). Faber's case rests on 3–12 months all working; a 22-fold
+  spread across neighbouring windows is a lucky parameter, not an effect.
+- **Sharpe was never distinguishable.** 0.07 versus 0.10 on the 2017 basket, and
+  0.62 versus 0.46 on the winners', where the 95% intervals were [−0.12, +1.36]
+  and [−0.25, +1.17]. At every sample length crypto can supply, these are the
+  same measurement.
+
+**Cause: survivorship bias in the symbol list.** BTC, ETH and SOL are today's
+winners, and SOL is in the set *because* it succeeded — information unavailable
+in 2020. Faber's own asset classes are indices, which do not have this problem;
+a hand-picked crypto basket is nothing but this problem. The strategy was never
+being tested. Three coins that went up a great deal were.
+
+### Caveats on the kill
+
+- The 2017 basket still excludes coins delisted before 2026, so the correction is
+  partial and the real result is likely worse than measured.
+- EOS and OMG stop mid-sample. The backtest holds them while they decline, so
+  those losses are counted, but no terminal gap-down at delisting is booked, and
+  weight silently redistributes to survivors. This flatters both the timed rule
+  and buy-and-hold equally, so it does not explain the reversal.
+- 100 months holds roughly 2.5 crypto cycles. The effective number of
+  independent get-out-and-back-in decisions is nearer ten than a hundred, which
+  is why no result here can carry much weight in either direction.
+
+### What this does not say
+
+Trend following is well supported across decades of equity, bond and commodity
+data, and nothing here contradicts that. What it says is narrower: **applied to
+a hand-picked basket of crypto assets over the only history that exists, it
+does not reduce drawdown and does not beat holding.** The published strategy was
+not the problem; the basket was.
+
+The code stays. `scripts/evaluate_tactical.py` against any CSV directory is now
+the cheapest honest test in the repo, and the survivorship check is a reusable
+pattern: run the candidate on assets chosen by a rule available at the time,
+never on the ones that worked out.
