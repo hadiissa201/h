@@ -220,8 +220,41 @@ TREND_STRATEGIES = (
     Strategy(name="trend_30m", trend_window_s=1800.0, **_TREND_COMMON),
 )
 
+# ------------------------------------------------- the stop-level experiment
+#
+# A MATCHED LADDER. Identical in every respect except where the stop sits.
+#
+# The hypothesis, and it is a good one: when a memecoin starts falling it
+# frequently never recovers, so a -50% stop rides a decline that a -15% stop
+# would have left early. The measured median stop exit was -77%, far below the
+# -50% it was set at, which looks like an argument for cutting sooner.
+#
+# The counter-argument, which is why this needs measuring rather than assuming.
+# A tighter stop helps only on a GRADUAL decline, where a price between -15%
+# and -50% was actually observed. It does nothing when the price gaps: if a
+# token falls by a factor of 100,000 between two observations, a -15% stop and
+# a -50% stop both execute at the same near-zero price. And a tight stop on an
+# asset this volatile will exit positions that would have recovered -- the
+# whipsaw cost, paid in winners never held.
+#
+# So the question is empirical and has two sides: how much does a tighter stop
+# save on the losers, and how many winners does it cost? Comparing the
+# take_profit counts across this ladder answers the second.
+_STOP_COMMON = dict(
+    max_age_s=1800, min_liquidity_usd=0.0, min_buys_5m=0,
+    take_profit_multiple=3.0, time_stop_s=3600, notional_usd=100.0,
+)
+
+STOP_STRATEGIES = (
+    Strategy(name="stop_10", stop_loss_multiple=0.90, **_STOP_COMMON),
+    Strategy(name="stop_15", stop_loss_multiple=0.85, **_STOP_COMMON),
+    Strategy(name="stop_20", stop_loss_multiple=0.80, **_STOP_COMMON),
+    Strategy(name="stop_35", stop_loss_multiple=0.65, **_STOP_COMMON),
+    Strategy(name="stop_50", stop_loss_multiple=0.50, **_STOP_COMMON),
+)
+
 ALL_STRATEGIES = (DEFAULT_STRATEGIES + SNIPER_STRATEGIES
-                  + STRUCTURAL_STRATEGIES + TREND_STRATEGIES)
+                  + STRUCTURAL_STRATEGIES + TREND_STRATEGIES + STOP_STRATEGIES)
 
 
 def latest_observation(session: Session, token_id: int) -> Observation | None:
