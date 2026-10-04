@@ -58,10 +58,15 @@ def test_price_uses_the_virtual_reserves():
 
 
 def test_price_respects_token_decimals():
-    """A 9-decimal token read as 6 would be priced 1000x wrong."""
+    """A 9-decimal token read as 6 would be priced 1000x wrong.
+
+    More decimals means the same raw reserve is FEWER whole tokens, so each one
+    is worth more. I asserted this backwards the first time, which is exactly
+    the error the test exists to catch in the parser.
+    """
     six = parse_bonding_curve(account()).price_sol(6)
     nine = parse_bonding_curve(account()).price_sol(9)
-    assert six == pytest.approx(nine * 1000)
+    assert nine == pytest.approx(six * 1000)
 
 
 def test_an_empty_curve_has_no_price_rather_than_zero():
