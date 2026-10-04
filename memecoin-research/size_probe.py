@@ -114,8 +114,14 @@ def quote_once(client: httpx.Client, url: str, mint: str, amount: int,
     if resp.status_code == 200:
         sim = parse_jupiter_quote(resp.text, notional)
         if sim.succeeded:
-            impact = abs(float(sim.price_impact_pct or 0.0))
-            return Quote(token_id, mint, notional, impact, True)
+            # Missing is NOT zero. parse_jupiter_quote deliberately preserves
+            # that difference and `or 0.0` threw it away, recording a quote
+            # with no impact field as a free exit -- which is how a token two
+            # days old appeared to cost 0.0% to sell $100 of.
+            raw = sim.price_impact_pct
+            impact = None if raw is None else abs(float(raw))
+            return Quote(token_id, mint, notional, impact, True,
+                         "" if impact is not None else "no impact reported")
         return Quote(token_id, mint, notional, None, False, sim.failure_kind or "")
     if says_no_route(resp.text):
         return Quote(token_id, mint, notional, None, False, "no_route")
@@ -135,7 +141,7 @@ def summarise(quotes: list[Quote]) -> None:
     # to is not a statement about the market, and dividing by all attempts
     # would let our own failures look like routing failures.
     print(f"  {'size':>8}{'tried':>9}{'answered':>9}{'routed':>9}"
-          f"{'route %':>9}{'median impact':>16}{'no answer':>12}")
+          f"{'route %':>9}{'median impact':>16}{'no impact':>10}{'no answer':>12}")
     for size in sorted(by_size, reverse=True):
         rows = by_size[size]
         asked = [q for q in rows if q.routed is not None]
@@ -144,8 +150,9 @@ def summarise(quotes: list[Quote]) -> None:
         median = f"{impacts[len(impacts) // 2] * 100:.1f}%" if impacts else "-"
         unanswered = [q for q in rows if q.routed is None]
         share = f"{len(routed) / len(asked) * 100:.0f}%" if asked else "-"
+        no_impact = sum(1 for q in routed if q.impact is None)
         print(f"  ${size:>7,.0f}{len(rows):>9}{len(asked):>9}{len(routed):>9}"
-              f"{share:>9}{median:>16}{len(unanswered):>12}")
+              f"{share:>9}{median:>16}{no_impact:>10}{len(unanswered):>12}")
 
     # The paired question: on tokens quoted at BOTH ends, does size help?
     big, small = max(SIZES), min(SIZES)
@@ -244,11 +251,15 @@ def main() -> int:
             refused = [q for q in got if q.routed is False]
             unanswered = [q for q in got if q.routed is None]
             if routed:
-                worst = max(q.impact or 0 for q in routed)
-                best = min(q.impact or 0 for q in routed)
-                print(f"  [{checked}] {token.address[:12]}... "
-                      f"{len(routed)}/{len(got)} routed, impact "
-                      f"{best * 100:.1f}% at small -> {worst * 100:.1f}% at large")
+                known = [q.impact for q in routed if q.impact is not None]
+                if known:
+                    print(f"  [{checked}] {token.address[:12]}... "
+                          f"{len(routed)}/{len(got)} routed, impact "
+                          f"{min(known) * 100:.1f}% at small -> "
+                          f"{max(known) * 100:.1f}% at large")
+                else:
+                    print(f"  [{checked}] {token.address[:12]}... "
+                          f"{len(routed)}/{len(got)} routed, impact NOT REPORTED")
             elif refused and not unanswered:
                 # The market genuinely said no at every size.
                 print(f"  [{checked}] {token.address[:12]}... NO ROUTE at any size")
