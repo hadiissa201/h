@@ -311,6 +311,32 @@ def main() -> int:
     for name, result in results.items():
         print(f"  {name:<14}{result.impact_summary()}")
 
+    # Independent intervals are the WRONG test here. Every strategy trades the
+    # same tokens, so the per-token difference has far less variance than two
+    # separate means suggest, and overlapping intervals can hide a real
+    # difference. Pair by token and test the differences.
+    names = list(results)
+    if len(names) > 1:
+        base = names[0]
+        by_token = {n: {p.token_id: p.net / 100.0 for p in results[n].closed}
+                    for n in names}
+        print(f"\npaired against {base} -- same tokens, so the difference is "
+              f"what matters")
+        print(f"  {'strategy':<14}{'mean diff':>11}{'95% CI':>22}{'n pairs':>9}")
+        for name in names[1:]:
+            shared = set(by_token[base]) & set(by_token[name])
+            diffs = [by_token[name][t] - by_token[base][t] for t in shared]
+            if len(diffs) < 2:
+                print(f"  {name:<14}{'too few pairs':>11}")
+                continue
+            mean = sum(diffs) / len(diffs)
+            var = sum((d - mean) ** 2 for d in diffs) / (len(diffs) - 1)
+            half = 1.96 * (var / len(diffs)) ** 0.5
+            verdict = "" if (mean - half) * (mean + half) > 0 else "   (spans 0)"
+            print(f"  {name:<14}{mean * 100:>+10.2f}%"
+                  f"{f'[{(mean - half) * 100:+7.2f}%, {(mean + half) * 100:+7.2f}%]':>22}"
+                  f"{len(diffs):>9}{verdict}")
+
     print("\nexit reasons")
     for name, result in results.items():
         print(f"  {name:<14}{result.reasons()}")
