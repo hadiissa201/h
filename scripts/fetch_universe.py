@@ -43,6 +43,27 @@ def wanted(base: str) -> bool:
     return not any(base.endswith(s) for s in SKIP_SUFFIX)
 
 
+def fetch_with_retries(exchange, symbol: str, timeframe: str,
+                       attempts: int) -> list[list[float]]:
+    """Retry a timeout before giving up.
+
+    The first run lost 45 pairs to RequestTimeout, among them SOL, ADA, AVAX,
+    SHIB and BCH. A timeout is not a property of the asset, but losing the
+    largest and calmest coins biases a VOLATILITY ranking specifically: big
+    caps belong in the low-vol bucket, so dropping them leaves that bucket
+    filled with smaller, odder names and the comparison measures the gaps.
+    """
+    last: Exception | None = None
+    for attempt in range(attempts):
+        try:
+            return fetch_all(exchange, symbol, timeframe)
+        except Exception as exc:
+            last = exc
+            if attempt < attempts - 1:
+                time.sleep(2.0 * (attempt + 1))
+    raise last if last else RuntimeError("no attempts made")
+
+
 def fetch_all(exchange, symbol: str, timeframe: str) -> list[list[float]]:
     bar_ms = exchange.parse_timeframe(timeframe) * 1000
     cursor, rows, seen = EPOCH_MS, [], set()
@@ -76,6 +97,11 @@ def main() -> int:
     parser.add_argument("--limit", type=int, default=0,
                         help="stop after this many pairs (0 = all)")
     parser.add_argument("--out", type=Path, default=Path("data/universe"))
+    parser.add_argument("--refresh", action="store_true",
+                        help="re-fetch pairs already on disk (default: skip "
+                             "them, so a second run only fills the gaps)")
+    parser.add_argument("--attempts", type=int, default=3,
+                        help="tries per pair before giving up")
     args = parser.parse_args()
 
     try:
@@ -99,13 +125,21 @@ def main() -> int:
     print(f"{len(symbols)} active {args.quote} spot pairs after excluding "
           f"stablecoins and leveraged tokens\n")
 
-    kept = skipped = failed = 0
+    kept = skipped = failed = resumed = 0
+    failures: list[str] = []
     for index, symbol in enumerate(symbols, 1):
+        path = args.out / f"{symbol.replace('/', '-')}_{args.timeframe}.csv"
+        if path.exists() and not args.refresh:
+            resumed += 1
+            kept += 1
+            continue
         try:
-            rows = fetch_all(exchange, symbol, args.timeframe)
+            rows = fetch_with_retries(exchange, symbol, args.timeframe,
+                                      args.attempts)
         except Exception as exc:
             print(f"  [{index}/{len(symbols)}] {symbol:<16} FAILED "
                   f"{type(exc).__name__}")
+            failures.append(symbol)
             failed += 1
             continue
 
@@ -115,7 +149,6 @@ def main() -> int:
                   f"bars, skipped", end="\r")
             continue
 
-        path = args.out / f"{symbol.replace('/', '-')}_{args.timeframe}.csv"
         with path.open("w", newline="", encoding="utf-8") as handle:
             writer = csv.writer(handle)
             writer.writerow(["timestamp", "open", "high", "low", "close", "volume"])
@@ -127,8 +160,14 @@ def main() -> int:
         print(f"  [{index}/{len(symbols)}] {symbol:<16} {len(rows):>5} bars "
               f"from {start:%Y-%m}  (kept {kept})")
 
-    print(f"\nkept {kept}, skipped {skipped} as too short, {failed} failed")
+    print(f"\nkept {kept} ({resumed} already on disk), skipped {skipped} as "
+          f"too short, {failed} failed")
     print(f"-> {args.out}")
+    if failures:
+        print(f"\n  {len(failures)} still missing: "
+              f"{', '.join(failures[:12])}{' ...' if len(failures) > 12 else ''}")
+        print("  Run this again to retry only those -- pairs already on disk "
+              "are skipped.")
     if kept < 30:
         print(f"\nWARNING: {kept} assets is too few to rank into buckets. "
               f"Lower --min-bars or check the quote currency.")
