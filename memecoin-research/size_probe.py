@@ -71,29 +71,38 @@ class Pacer:
     drifting back up on success keeps the run inside whatever the limit
     actually is today, without needing to know it.
     """
-    delay: float = 1.1
-    floor: float = 0.8
-    ceiling: float = 8.0
+    delay: float = 1.5
+    floor: float = 1.0
+    ceiling: float = 4.0
     throttles: int = 0
+    _slept: bool = False
 
     def wait(self) -> None:
+        # A 429 already paid its penalty inside saw_429; sleeping again here
+        # charged every rate limit twice, which is half the reason an hour
+        # produced fewer tokens than the preceding fifteen minutes.
+        if self._slept:
+            self._slept = False
+            return
         time.sleep(self.delay)
 
     def saw_429(self, retry_after: str | None) -> None:
         self.throttles += 1
-        self.delay = min(self.ceiling, self.delay * 1.6)
+        self.delay = min(self.ceiling, self.delay * 1.4)
         pause = self.delay
         if retry_after:
             try:
-                pause = max(pause, float(retry_after))
+                pause = max(pause, min(float(retry_after), 30.0))
             except ValueError:
                 pass
         time.sleep(pause)
+        self._slept = True
 
     def saw_success(self) -> None:
-        # Drift back toward the floor so one early 429 does not slow the whole
-        # run to a crawl.
-        self.delay = max(self.floor, self.delay * 0.97)
+        # Recovery has to be faster than the backoff, or this is a one-way
+        # ratchet: at 3% per success it needed ~76 clean replies to come back
+        # from the ceiling, and a throttled run never gets that many.
+        self.delay = max(self.floor, self.delay * 0.85)
 
 
 def quote_once(client: httpx.Client, url: str, mint: str, amount: int,
