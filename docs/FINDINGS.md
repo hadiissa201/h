@@ -500,3 +500,68 @@ It does not say nobody makes money on memecoins. It says that **this structure**
 because the stop is unenforceable and the winners are the hardest to exit.
 Anyone profiting is either exiting inside the same block as their entry, or
 being paid for order flow rather than for direction.
+
+---
+
+## Low volatility on crypto: the direction is right, the edge is arithmetic (2026-10-04)
+
+341 Binance USDT pairs, trailing 36-month volatility of monthly log returns,
+hold the calmest quintile, monthly rebalance, 12-month sustained volume floor to
+keep untraded coins out. 64 months tested, 2021-06 to 2026-09.
+
+| bucket | total | CAGR | vol | maxDD | Sharpe |
+|---|---|---|---|---|---|
+| low vol | −11.8% | −2.3% | 59.6% | −69.6% | −0.11 |
+| high vol | −72.7% | −21.6% | 85.9% | −89.8% | −0.30 |
+| whole universe | −72.4% | −21.4% | 73.2% | −84.8% | −0.35 |
+| **lend at 4%** | **+23.3%** | **+4.0%** | 0% | 0% | — |
+
+Low volatility beat high volatility by 61 points of final wealth, which looks
+like the anomaly reproducing. It is not.
+
+### The 61 points are volatility drag, not return
+
+Geometric return is roughly arithmetic minus half the variance. Backing the
+arithmetic means out:
+
+| bucket | CAGR | volatility drag | implied arithmetic mean |
+|---|---|---|---|
+| low vol | −2.3% | 17.8% | **+15.5%** |
+| high vol | −21.6% | 36.9% | **+15.3%** |
+
+**The two buckets earn the same return — 0.1 points apart.** The entire wealth
+gap is the cost of compounding through 86% volatility instead of 60%. That is
+arithmetic, true of any two assets with equal mean and different variance, and
+it is not an edge anyone has failed to notice.
+
+Consistent with this, the formal test on monthly differences gives +3.00%
+annualised with a 95% interval of [−85.8%, +91.8%] and t = +0.07. On means there
+is nothing there, and the test said so.
+
+### It also loses to doing nothing
+
+The calmest quintile returned −11.8% while lending the same capital returned
++23.3%, and it did so with a 69.6% drawdown. A strategy that beats its
+comparison bucket and loses to a savings account has not been shown to work.
+
+### What would make this test unfair, stated against myself
+
+The 36-month lookback means the first tradeable month is 2021-06, so the window
+begins after the November 2021 alt peak and the entire universe returned −72%.
+Every long-only crypto strategy would look bad here. A shorter lookback would
+buy more months, but choosing it after seeing this result is how the Faber
++2,271% was manufactured, so the published 36 months stands.
+
+The honest summary is therefore narrow: **on the only window the data supports,
+low volatility ranks coins in the right order and still loses to a savings
+account, and the ranking's apparent advantage is a mathematical consequence of
+lower variance rather than a difference in what the coins earn.**
+
+### Scoreboard
+
+Eleven strategies now tested across both halves of this project. None beat
+lending at 4%. The failures are not all the same failure, which is the useful
+part: sniper timing was indistinguishable, authority filters could not
+differentiate, trend following was survivorship bias, memecoin exits cannot be
+stopped at the level they are set, and low volatility is a variance effect
+wearing an anomaly's clothes.
