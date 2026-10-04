@@ -35,7 +35,10 @@ from collector.models import Observation, Token
 from poc.sources import parse_jupiter_quote, says_no_route
 from probe.constants import WSOL_MINT
 
-SIZES = (100.0, 50.0, 20.0, 10.0, 5.0)
+# Three sizes, not five: the question is whether impact falls with size, and
+# three points answer that while covering three times as many tokens per
+# minute. Coverage is the binding constraint, not resolution.
+SIZES = (100.0, 20.0, 5.0)
 # Jupiter rejects amounts outside a sane range with a 400, and a 400 is not a
 # statement about liquidity.
 MIN_AMOUNT, MAX_AMOUNT = 1_000, 10 ** 18
@@ -58,14 +61,55 @@ def amount_for(notional: float, price: float, decimals: int) -> int | None:
     return raw if MIN_AMOUNT <= raw <= MAX_AMOUNT else None
 
 
+@dataclass
+class Pacer:
+    """Self-tuning delay between requests.
+
+    Jupiter's free endpoint rate-limits harder than a fixed 1.5/s, and the
+    first run spent its whole budget collecting 429s -- which then had to be
+    carefully NOT counted as routing failures. Slowing down on a 429 and
+    drifting back up on success keeps the run inside whatever the limit
+    actually is today, without needing to know it.
+    """
+    delay: float = 1.1
+    floor: float = 0.8
+    ceiling: float = 8.0
+    throttles: int = 0
+
+    def wait(self) -> None:
+        time.sleep(self.delay)
+
+    def saw_429(self, retry_after: str | None) -> None:
+        self.throttles += 1
+        self.delay = min(self.ceiling, self.delay * 1.6)
+        pause = self.delay
+        if retry_after:
+            try:
+                pause = max(pause, float(retry_after))
+            except ValueError:
+                pass
+        time.sleep(pause)
+
+    def saw_success(self) -> None:
+        # Drift back toward the floor so one early 429 does not slow the whole
+        # run to a crawl.
+        self.delay = max(self.floor, self.delay * 0.97)
+
+
 def quote_once(client: httpx.Client, url: str, mint: str, amount: int,
-               notional: float, token_id: int, slippage_bps: int) -> Quote:
+               notional: float, token_id: int, slippage_bps: int,
+               pacer: Pacer) -> Quote:
     try:
         resp = client.get(url, params={
             "inputMint": mint, "outputMint": WSOL_MINT,
             "amount": str(amount), "slippageBps": str(slippage_bps)}, timeout=20.0)
     except Exception as exc:
         return Quote(token_id, mint, notional, None, None, f"{type(exc).__name__}")
+
+    if resp.status_code == 429:
+        pacer.saw_429(resp.headers.get("Retry-After"))
+        return Quote(token_id, mint, notional, None, None, "HTTP 429")
+    pacer.saw_success()
 
     if resp.status_code == 200:
         sim = parse_jupiter_quote(resp.text, notional)
@@ -156,8 +200,7 @@ def main() -> int:
     engine = create_engine(settings.database_url, future=True)
     deadline = time.monotonic() + args.minutes * 60
     quotes: list[Quote] = []
-    # Jupiter's measured ceiling is ~120/min; stay well inside it.
-    pause = 1.0 / 1.5
+    pacer = Pacer()
 
     with Session(engine) as session, httpx.Client() as client:
         cutoff = datetime.now(UTC) - timedelta(hours=args.max_age_hours)
@@ -166,7 +209,9 @@ def main() -> int:
             .order_by(Token.detected_ts.desc())).all()
         print(f"{len(tokens)} tokens detected in the last {args.max_age_hours:.0f}h")
         print(f"Quoting each at {', '.join(f'${s:,.0f}' for s in SIZES)} "
-              f"for {args.minutes:.0f} minutes.\n")
+              f"for {args.minutes:.0f} minutes.")
+        print("Pacing adapts to 429s, so the rate settles wherever Jupiter "
+              "allows.\n")
 
         checked = 0
         for token in tokens:
@@ -191,8 +236,8 @@ def main() -> int:
                     continue
                 got.append(quote_once(client, settings.jupiter_quote_url,
                                       token.address, amount, size, token.id,
-                                      settings.exit_slippage_bps))
-                time.sleep(pause)
+                                      settings.exit_slippage_bps, pacer))
+                pacer.wait()
             quotes.extend(got)
             checked += 1
             routed = [q for q in got if q.routed]
@@ -216,6 +261,8 @@ def main() -> int:
                       f"({len(unanswered)}/{len(got)} failed: "
                       f"{', '.join(sorted(reasons)[:3]) or 'unknown'})")
 
+    print(f"\n  pacing ended at {pacer.delay:.2f}s between requests after "
+          f"{pacer.throttles} rate limits")
     if not quotes:
         print("\nNo quotes collected. Is the database populated and the network up?")
         return 1
