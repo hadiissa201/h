@@ -92,12 +92,39 @@ def parse_bonding_curve(data_base64: str) -> BondingCurve:
                         token_total_supply=supply, complete=bool(complete))
 
 
+class RpcError(RuntimeError):
+    """The node did not return JSON. Carries why, with the key redacted."""
+
+
+def _redact(url: str) -> str:
+    """Never let an api-key reach a log or a terminal."""
+    import re
+    return re.sub(r"(api[-_]?key=)[^&]+", r"\1***", url, flags=re.I)
+
+
 def _rpc(client: httpx.Client, url: str, method: str, params: list,
          timeout: float = 20.0) -> dict:
+    """One JSON-RPC call, failing with the status and body when it is not JSON.
+
+    Calling .json() on an unchecked response turned every RPC failure into a
+    bare JSONDecodeError, which says nothing about whether the key is rejected,
+    the quota is spent, or the host is wrong -- three problems with three
+    different fixes.
+    """
     resp = client.post(url, json={"jsonrpc": "2.0", "id": 1,
                                   "method": method, "params": params},
                        timeout=timeout)
-    return resp.json() or {}
+    try:
+        body = resp.json()
+    except ValueError:
+        snippet = (resp.text or "")[:160].replace("\n", " ")
+        raise RpcError(f"HTTP {resp.status_code} from {_redact(url)}: "
+                       f"{snippet or 'empty response'}") from None
+    if isinstance(body, dict) and body.get("error"):
+        err = body["error"]
+        raise RpcError(f"node refused {method}: "
+                       f"{err.get('message', err)}")
+    return body or {}
 
 
 def find_bonding_curve(client: httpx.Client, rpc_url: str, mint: str,
@@ -114,8 +141,10 @@ def find_bonding_curve(client: httpx.Client, rpc_url: str, mint: str,
     try:
         body = _rpc(client, rpc_url, "getTokenLargestAccounts", [mint], timeout)
         accounts = ((body.get("result") or {}).get("value")) or []
+    except RpcError as exc:
+        return None, f"largest accounts: {exc}"
     except Exception as exc:  # noqa: BLE001
-        return None, f"largest accounts failed: {type(exc).__name__}"
+        return None, f"largest accounts failed: {type(exc).__name__}: {exc}"
     if not accounts:
         return None, "no token accounts exist yet"
 
@@ -124,8 +153,10 @@ def find_bonding_curve(client: httpx.Client, rpc_url: str, mint: str,
                     [accounts[0].get("address"), {"encoding": "jsonParsed"}], timeout)
         value = ((info.get("result") or {}).get("value")) or {}
         owner = ((value.get("data") or {}).get("parsed") or {}).get("info", {}).get("owner")
+    except RpcError as exc:
+        return None, f"owner lookup: {exc}"
     except Exception as exc:  # noqa: BLE001
-        return None, f"owner lookup failed: {type(exc).__name__}"
+        return None, f"owner lookup failed: {type(exc).__name__}: {exc}"
     if not owner:
         return None, "largest token account has no owner"
     return owner, f"curve {owner[:8]}... holds the largest balance"
@@ -137,6 +168,8 @@ def read_curve(client: httpx.Client, rpc_url: str, curve_address: str,
     try:
         body = _rpc(client, rpc_url, "getAccountInfo",
                     [curve_address, {"encoding": "base64"}], timeout)
+    except RpcError as exc:
+        return None, str(exc)
     except Exception as exc:  # noqa: BLE001
         return None, f"{type(exc).__name__}: {exc}"
     value = ((body.get("result") or {}).get("value")) or {}

@@ -26,7 +26,12 @@ from sqlalchemy.orm import Session
 
 from collector.config import load_settings
 from collector.models import Observation, Token
-from collector.onchain import find_bonding_curve, read_curve, sol_price_usd
+from collector.onchain import (
+    _redact,
+    find_bonding_curve,
+    read_curve,
+    sol_price_usd,
+)
 
 
 def main() -> int:
@@ -39,6 +44,7 @@ def main() -> int:
     engine = create_engine(settings.database_url, future=True)
 
     with Session(engine) as session, httpx.Client() as client:
+        print(f"RPC endpoint: {_redact(settings.rpc_url)}")
         sol_usd = sol_price_usd(client, settings.jupiter_quote_url)
         if sol_usd is None:
             print("Could not price SOL; dollar comparisons will be skipped.\n")
