@@ -59,6 +59,32 @@ def _aware(moment: datetime) -> datetime:
     return moment if moment.tzinfo else moment.replace(tzinfo=UTC)
 
 
+def why_no_entry(observations: list[tuple[datetime, float, float]],
+                 detected: datetime, notional: float) -> str:
+    """Which condition kept every observation from being a valid entry.
+
+    Lowering the order from $100 to $10 changed the tradable count from 134 to
+    135, so the pool-size gate is not what excludes 92% of tokens. Guessing a
+    second time is how three wrong diagnoses happened on the work queue, so the
+    reason is counted instead.
+    """
+    in_window = [o for o in observations
+                 if (o[0] - detected).total_seconds() <= ENTRY_WINDOW_S]
+    if not in_window:
+        return "no observation inside the entry window"
+    priced = [o for o in in_window if o[1] > 0]
+    if not priced:
+        return "no usable price"
+    with_liquidity = [o for o in priced if o[2] > 0]
+    if not with_liquidity:
+        # The likeliest cause, and it is a hole in OUR data rather than a fact
+        # about the token: DexScreener reports no liquidity for many new pools.
+        return "no liquidity figure recorded"
+    if not any(notional <= o[2] * MAX_POOL_FRACTION for o in with_liquidity):
+        return "pool too small for the order"
+    return "entry existed but no later exit"
+
+
 def best_trade(observations: list[tuple[datetime, float, float]],
                sellable_at: dict[datetime, float] | None,
                detected: datetime, notional: float,
@@ -154,9 +180,11 @@ def main() -> int:
         tokens = session.scalars(query).all()
         print(f"Oracle over {len(tokens)} tokens at ${args.notional:,.0f} per position\n")
 
+        from collections import Counter
         chart: list[Best] = []
         sellable: list[Best] = []
         no_entry = 0
+        reasons: Counter[str] = Counter()
 
         for token in tokens:
             rows = session.execute(
@@ -169,6 +197,7 @@ def main() -> int:
                             for ts, p, liq in rows if p and float(p) > 0]
             if len(observations) < 2:
                 no_entry += 1
+                reasons["fewer than two priced observations"] += 1
                 continue
 
             sims = session.execute(
@@ -184,6 +213,7 @@ def main() -> int:
                 chart.append(with_chart)
             else:
                 no_entry += 1
+                reasons[why_no_entry(observations, detected, args.notional)] += 1
             if with_exit.traded:
                 sellable.append(with_exit)
 
@@ -223,7 +253,18 @@ def main() -> int:
     sell_sel = report("SELLABLE ORACLE -- every exit verified sellable",
                       sellable, len(tokens))
     print(f"\n  our best strategy        {-37.3:>+7.1f}%  (stop_10, replay)")
-    print(f"  {no_entry} tokens never offered a valid entry at all")
+    print(f"\n  {no_entry} tokens never offered a valid entry. Why:")
+    for reason, count in reasons.most_common():
+        print(f"    {count:>6}  {reason}")
+    gaps = sum(n for r, n in reasons.items()
+               if "liquidity figure" in r or "usable price" in r
+               or "fewer than two" in r)
+    if gaps > no_entry * 0.5:
+        print(f"\n  WARNING: {gaps} of {no_entry} are missing OUR data, not")
+        print("  failing a market test. The tokens analysed above are the ones")
+        print("  a price aggregator indexed properly, which skews toward the")
+        print("  ones that grew enough to be noticed -- so the ceiling here is")
+        print("  measured on a favourable subsample and is optimistic.")
 
     if chart and sellable and chart_sel is not None and sell_sel is not None:
         chart_mean, sell_mean = chart_sel, sell_sel
