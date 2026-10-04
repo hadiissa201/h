@@ -217,3 +217,87 @@ def test_the_shared_ladder_orders_rules_deterministically():
 def test_the_grace_period_applies_in_replay_too():
     assert trend_broken_from_prices(STRAT, [1.0, 1.0, 1.0], 0.5, held_s=10) is False
     assert trend_broken_from_prices(STRAT, [1.0, 1.0, 1.0], 0.5, held_s=100) is True
+
+
+# ------------------------------------------------------------- trailing exits
+TRAIL = Strategy(name="trail", max_age_s=1800, min_liquidity_usd=0.0,
+                 min_buys_5m=0, take_profit_multiple=1_000_000.0,
+                 stop_loss_multiple=0.90, time_stop_s=36_000,
+                 notional_usd=100.0, round_trip_cost_pct=0.01,
+                 trailing_stop_pct=0.20, trail_after_multiple=1.5)
+
+
+def test_a_runner_is_held_past_the_old_take_profit_level(session):
+    """The whole point: +200% was a cap, and the cap was the losing half."""
+    token = make_token(session)
+    prices = [0.001, 0.002, 0.004, 0.008, 0.016]        # x16, no cap hit
+    for i, price in enumerate(prices):
+        at = TS + timedelta(seconds=30 + i * 60)
+        observe(session, token, at, price)
+        can_sell(session, token, at)
+    session.commit()
+
+    replayed, _ = replay_token(session, token, TRAIL, Settings())
+    assert replayed is not None
+    assert replayed.exit_ts is None, "sold while still rising"
+    assert replayed.peak_multiple >= 15.0
+
+
+def test_the_trail_fires_on_a_pullback_from_the_peak(session):
+    token = make_token(session)
+    # Up to x8, then a 25% fall from the peak -- past the 20% trail.
+    for i, price in enumerate([0.001, 0.004, 0.008, 0.0058]):
+        at = TS + timedelta(seconds=30 + i * 60)
+        observe(session, token, at, price)
+        can_sell(session, token, at)
+    session.commit()
+
+    replayed, _ = replay_token(session, token, TRAIL, Settings())
+    assert replayed is not None and replayed.exit_ts is not None
+    assert replayed.reason == "trailing_stop"
+    assert replayed.net > 0, "a x8 runner exited at a loss"
+
+
+def test_the_trail_is_disarmed_below_the_activation_multiple(session):
+    """Launch noise must not trail a position out in its first minute."""
+    token = make_token(session)
+    # Wobbles around entry, never reaching x1.5.
+    for i, price in enumerate([0.001, 0.0012, 0.00095, 0.0011]):
+        at = TS + timedelta(seconds=30 + i * 60)
+        observe(session, token, at, price)
+        can_sell(session, token, at)
+    session.commit()
+    replayed, _ = replay_token(session, token, TRAIL, Settings())
+    assert replayed is not None
+    assert replayed.exit_ts is None, "trailed out before the trail should arm"
+
+
+def test_the_tight_stop_still_covers_the_pre_arming_period(session):
+    token = make_token(session)
+    for i, price in enumerate([0.001, 0.0008]):        # -20%, past the -10% stop
+        at = TS + timedelta(seconds=30 + i * 60)
+        observe(session, token, at, price)
+        can_sell(session, token, at)
+    session.commit()
+    replayed, _ = replay_token(session, token, TRAIL, Settings())
+    assert replayed is not None and replayed.reason == "stop_loss"
+
+
+def test_a_trail_cannot_sell_what_has_no_route(session):
+    """The predicted failure mode: winners are the hardest positions to exit."""
+    token = make_token(session)
+    for i, price in enumerate([0.001, 0.004, 0.008]):
+        at = TS + timedelta(seconds=30 + i * 60)
+        observe(session, token, at, price)
+        can_sell(session, token, at)
+    at = TS + timedelta(seconds=30 + 3 * 60)
+    observe(session, token, at, 0.0058)               # the pullback
+    insert_simulated_exit(session, token_id=token.id, simulated_ts=at,
+                          method="quote", notional_usd=100.0, succeeded=False,
+                          failure_kind="no_route")
+    session.commit()
+
+    replayed, _ = replay_token(session, token, TRAIL, Settings())
+    assert replayed is not None
+    assert replayed.exit_ts is None, "sold a position with no route"
+    assert replayed.blocked_our_fault >= 1

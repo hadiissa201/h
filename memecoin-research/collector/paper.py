@@ -79,6 +79,25 @@ class Strategy:
     trend_min_points: int = 3            # too few points is not an average
     trend_grace_s: float = 60.0          # ignore the launch-minute whipsaw
 
+    # ---- trailing exit: let a winner run, then sell on the pullback
+    # The fixed take-profit caps gains at the multiple, while the stop cannot
+    # cap losses at all -- measured median stop exit was -77% on a -50% stop.
+    # That shape loses by construction. A trailing stop inverts it: the loss is
+    # cut tight, and the gain is bounded by how far the token runs rather than
+    # by a number chosen in advance.
+    #
+    # trailing_stop_pct is the fall FROM THE PEAK that triggers a sale, and it
+    # only arms once the position is above trail_after_multiple -- otherwise
+    # launch noise would trip it in the first minute, and the tight initial
+    # stop is what covers that period.
+    #
+    # The same gap limitation applies: a trail cannot beat liquidity pulled in
+    # one block. What it can do is sell into a decline that happens over
+    # several observations, which is the case a fixed take-profit never sees
+    # because it has already sold at the cap.
+    trailing_stop_pct: float = 0.0       # 0 = no trailing exit
+    trail_after_multiple: float = 1.0    # arm only once above this multiple
+
     take_profit_multiple: float = 3.0    # +200%
     stop_loss_multiple: float = 0.5      # -50%
     time_stop_s: float = 3600.0          # give up after an hour
@@ -253,8 +272,46 @@ STOP_STRATEGIES = (
     Strategy(name="stop_50", stop_loss_multiple=0.50, **_STOP_COMMON),
 )
 
-ALL_STRATEGIES = (DEFAULT_STRATEGIES + SNIPER_STRATEGIES
-                  + STRUCTURAL_STRATEGIES + TREND_STRATEGIES + STOP_STRATEGIES)
+# ------------------------------------------------ the trailing exit ladder
+#
+# The shape the structural finding points to: cut losses tight, and do not cap
+# gains at all. Memecoins that work do not stop at +200%; capping there while
+# losses run to -77% is the losing structure measured across 227 stop exits.
+#
+# take_profit is set absurdly high rather than removed, so these arms are the
+# same code path as every other strategy and the only live exits are the tight
+# stop and the trail.
+#
+# What would make this fail, recorded in advance: the winners are exactly the
+# positions that cannot be sold. 26% of 17,113 exit checks found no route, and
+# the blocked exits logged include x6.02, x4.34 and x3.03. A trail that fires at
+# +400% is worth nothing if nothing will buy. These arms will show that as
+# `stuck` rather than as returns.
+_TRAIL_COMMON = dict(
+    max_age_s=1800, min_liquidity_usd=0.0, min_buys_5m=0,
+    take_profit_multiple=1_000_000.0,     # effectively no cap on the upside
+    time_stop_s=21_600,                   # six hours: let a runner run
+    notional_usd=100.0,
+)
+
+TRAILING_STRATEGIES = (
+    # Tight initial stop, then trail 20% below the peak once up 50%.
+    Strategy(name="trail_7_20", stop_loss_multiple=0.93,
+             trailing_stop_pct=0.20, trail_after_multiple=1.5, **_TRAIL_COMMON),
+    # Same, but a looser trail that gives a volatile runner more room.
+    Strategy(name="trail_7_35", stop_loss_multiple=0.93,
+             trailing_stop_pct=0.35, trail_after_multiple=1.5, **_TRAIL_COMMON),
+    # A 10% initial stop with a tight 20% trail.
+    Strategy(name="trail_10_20", stop_loss_multiple=0.90,
+             trailing_stop_pct=0.20, trail_after_multiple=1.5, **_TRAIL_COMMON),
+    # Arms later: only starts trailing once the position has tripled, so small
+    # winners are held through noise instead of being trailed out early.
+    Strategy(name="trail_10_late", stop_loss_multiple=0.90,
+             trailing_stop_pct=0.30, trail_after_multiple=3.0, **_TRAIL_COMMON),
+)
+
+ALL_STRATEGIES = (DEFAULT_STRATEGIES + SNIPER_STRATEGIES + STRUCTURAL_STRATEGIES
+                  + TREND_STRATEGIES + STOP_STRATEGIES + TRAILING_STRATEGIES)
 
 
 def latest_observation(session: Session, token_id: int) -> Observation | None:
@@ -485,7 +542,7 @@ def _structural_ok(session: Session, token: Token, strategy: Strategy) -> bool:
 
 
 def exit_trigger(strategy: Strategy, multiple: float, held_s: float,
-                 trend_broken: bool) -> str | None:
+                 trend_broken: bool, peak_multiple: float | None = None) -> str | None:
     """Which exit rule fires, if any. Pure: no session, no clock, no I/O.
 
     Extracted so the live trader and any historical replay decide identically.
@@ -500,6 +557,10 @@ def exit_trigger(strategy: Strategy, multiple: float, held_s: float,
         return "take_profit"
     if multiple <= strategy.stop_loss_multiple:
         return "stop_loss"
+    if (strategy.trailing_stop_pct > 0 and peak_multiple is not None
+            and peak_multiple >= strategy.trail_after_multiple
+            and multiple <= peak_multiple * (1.0 - strategy.trailing_stop_pct)):
+        return "trailing_stop"
     if trend_broken:
         return "trend_exit"
     if held_s >= strategy.time_stop_s:
@@ -600,10 +661,15 @@ def manage_position(session: Session, position: PaperPosition,
         opened = opened.replace(tzinfo=UTC)
     held_s = (moment - opened).total_seconds()
 
+    # The peak a trailing stop trails from is the one that was OBSERVED, which
+    # is what a trader watching the chart would react to. Whether that peak was
+    # sellable is a separate question, answered below by the exit check.
+    observed_peak = float(position.unrealisable_peak_multiple or multiple)
     reason = exit_trigger(
         strategy, multiple, held_s,
         trend_broken=_trend_broken(session, position, strategy, moment,
-                                   price, held_s))
+                                   price, held_s),
+        peak_multiple=observed_peak)
     if reason is None:
         return None
 

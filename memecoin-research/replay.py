@@ -199,7 +199,8 @@ def replay_token(session: Session, token: Token, strategy: Strategy,
         window = [p for ts, p in prices if window_start <= ts <= moment]
         reason = exit_trigger(
             strategy, multiple, held_s,
-            trend_broken=trend_broken_from_prices(strategy, window, price, held_s))
+            trend_broken=trend_broken_from_prices(strategy, window, price, held_s),
+            peak_multiple=position.peak_multiple)
         if reason is None:
             continue
 
