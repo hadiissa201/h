@@ -32,9 +32,12 @@ from __future__ import annotations
 import base64
 import hashlib
 import struct
+import time
 from dataclasses import dataclass
 
 import httpx
+
+from collector.pacing import Pacer
 
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 WSOL_DECIMALS = 9
@@ -103,7 +106,8 @@ def _redact(url: str) -> str:
 
 
 def _rpc(client: httpx.Client, url: str, method: str, params: list,
-         timeout: float = 20.0) -> dict:
+         timeout: float = 20.0, pacer: Pacer | None = None,
+         attempts: int = 3) -> dict:
     """One JSON-RPC call, failing with the status and body when it is not JSON.
 
     Calling .json() on an unchecked response turned every RPC failure into a
@@ -111,9 +115,20 @@ def _rpc(client: httpx.Client, url: str, method: str, params: list,
     the quota is spent, or the host is wrong -- three problems with three
     different fixes.
     """
-    resp = client.post(url, json={"jsonrpc": "2.0", "id": 1,
-                                  "method": method, "params": params},
-                       timeout=timeout)
+    for attempt in range(attempts):
+        resp = client.post(url, json={"jsonrpc": "2.0", "id": 1,
+                                      "method": method, "params": params},
+                           timeout=timeout)
+        if resp.status_code != 429:
+            break
+        # Refused, not broken. Back off and try again rather than discarding a
+        # token, which is how a whole run came back empty.
+        if pacer is not None:
+            pacer.saw_429(resp.headers.get("Retry-After"))
+        elif attempt < attempts - 1:
+            time.sleep(2.0 * (attempt + 1))
+    if pacer is not None and resp.status_code != 429:
+        pacer.saw_success()
     try:
         body = resp.json()
     except ValueError:
@@ -128,7 +143,8 @@ def _rpc(client: httpx.Client, url: str, method: str, params: list,
 
 
 def find_bonding_curve(client: httpx.Client, rpc_url: str, mint: str,
-                       timeout: float = 20.0) -> tuple[str | None, str]:
+                       timeout: float = 20.0,
+                       pacer: Pacer | None = None) -> tuple[str | None, str]:
     """The curve's address, via its token account rather than PDA arithmetic.
 
     Deriving the PDA needs ed25519 point validation; the curve is also simply
@@ -139,7 +155,7 @@ def find_bonding_curve(client: httpx.Client, rpc_url: str, mint: str,
     Resolved once per token and stored, so routine observations cost one call.
     """
     try:
-        body = _rpc(client, rpc_url, "getTokenLargestAccounts", [mint], timeout)
+        body = _rpc(client, rpc_url, "getTokenLargestAccounts", [mint], timeout, pacer)
         accounts = ((body.get("result") or {}).get("value")) or []
     except RpcError as exc:
         return None, f"largest accounts: {exc}"
@@ -150,7 +166,8 @@ def find_bonding_curve(client: httpx.Client, rpc_url: str, mint: str,
 
     try:
         info = _rpc(client, rpc_url, "getAccountInfo",
-                    [accounts[0].get("address"), {"encoding": "jsonParsed"}], timeout)
+                    [accounts[0].get("address"), {"encoding": "jsonParsed"}],
+                    timeout, pacer)
         value = ((info.get("result") or {}).get("value")) or {}
         owner = ((value.get("data") or {}).get("parsed") or {}).get("info", {}).get("owner")
     except RpcError as exc:
@@ -163,11 +180,12 @@ def find_bonding_curve(client: httpx.Client, rpc_url: str, mint: str,
 
 
 def read_curve(client: httpx.Client, rpc_url: str, curve_address: str,
-               timeout: float = 20.0) -> tuple[BondingCurve | None, str]:
+               timeout: float = 20.0,
+               pacer: Pacer | None = None) -> tuple[BondingCurve | None, str]:
     """One call. Returns (curve, detail); a None curve carries the reason."""
     try:
         body = _rpc(client, rpc_url, "getAccountInfo",
-                    [curve_address, {"encoding": "base64"}], timeout)
+                    [curve_address, {"encoding": "base64"}], timeout, pacer)
     except RpcError as exc:
         return None, str(exc)
     except Exception as exc:  # noqa: BLE001

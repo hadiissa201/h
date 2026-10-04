@@ -25,6 +25,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from collector.config import load_settings
+from collector.pacing import Pacer
 from collector.models import Observation, Token
 from collector.onchain import (
     _redact,
@@ -56,6 +57,7 @@ def main() -> int:
             select(Token).where(Token.detected_ts >= cutoff)
             .order_by(Token.detected_ts.desc()).limit(args.limit)).all()
 
+        pacer = Pacer()
         agreed, disagreed, chain_only, unreadable = [], [], 0, []
         for token in tokens:
             obs = session.scalars(
@@ -66,12 +68,15 @@ def main() -> int:
             dex_price = (float(obs.price_usd)
                          if obs and obs.price_usd and float(obs.price_usd) > 0 else None)
 
+            pacer.wait()
             curve_address, note = find_bonding_curve(client, settings.rpc_url,
-                                                     token.address)
+                                                     token.address, pacer=pacer)
             if curve_address is None:
                 unreadable.append((token.address, note))
                 continue
-            curve, detail = read_curve(client, settings.rpc_url, curve_address)
+            pacer.wait()
+            curve, detail = read_curve(client, settings.rpc_url, curve_address,
+                                       pacer=pacer)
             if curve is None:
                 unreadable.append((token.address, detail))
                 continue
@@ -102,6 +107,8 @@ def main() -> int:
                   f"chain {chain_usd:.3e}  ratio {ratio:6.2f}  {flag}"
                   f"{'  [graduated]' if curve.complete else ''}")
 
+    print(f"\n  pacing ended at {pacer.delay:.2f}s after {pacer.throttles} "
+          f"rate limits")
     total = len(agreed) + len(disagreed)
     print("\n" + "=" * 70)
     print("DOES THE LAYOUT READ CORRECTLY?")
