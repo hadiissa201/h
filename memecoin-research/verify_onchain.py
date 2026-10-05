@@ -29,6 +29,7 @@ from collector.pacing import Pacer
 from collector.models import Observation, Token
 from collector.onchain import (
     _redact,
+    curve_address,
     find_bonding_curve,
     read_curve,
     sol_price_usd,
@@ -68,15 +69,24 @@ def main() -> int:
             dex_price = (float(obs.price_usd)
                          if obs and obs.price_usd and float(obs.price_usd) > 0 else None)
 
-            pacer.wait()
-            curve_address, note = find_bonding_curve(client, settings.rpc_url,
-                                                     token.address, pacer=pacer)
-            if curve_address is None:
+            # Derived locally: no RPC call, so one token costs one request.
+            address, note = curve_address(token.address)
+            if address is None:
                 unreadable.append((token.address, note))
                 continue
             pacer.wait()
-            curve, detail = read_curve(client, settings.rpc_url, curve_address,
+            curve, detail = read_curve(client, settings.rpc_url, address,
                                        pacer=pacer)
+            if curve is None and "does not exist" in detail:
+                # Not at the derived address -- graduated, or not a pump.fun
+                # curve. Fall back to the expensive lookup for just these.
+                pacer.wait()
+                fallback, note = find_bonding_curve(client, settings.rpc_url,
+                                                    token.address, pacer=pacer)
+                if fallback:
+                    pacer.wait()
+                    curve, detail = read_curve(client, settings.rpc_url,
+                                               fallback, pacer=pacer)
             if curve is None:
                 unreadable.append((token.address, detail))
                 continue

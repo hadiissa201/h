@@ -38,6 +38,7 @@ from dataclasses import dataclass
 import httpx
 
 from collector.pacing import Pacer
+from collector.pda import bonding_curve_address
 
 PUMP_PROGRAM = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P"
 WSOL_DECIMALS = 9
@@ -142,17 +143,29 @@ def _rpc(client: httpx.Client, url: str, method: str, params: list,
     return body or {}
 
 
+def curve_address(mint: str) -> tuple[str | None, str]:
+    """The curve's address, derived locally. No network call at all.
+
+    This replaced asking the node for the token's largest accounts and reading
+    the owner. That worked, but getTokenLargestAccounts is among the most
+    expensive methods an RPC offers and forty tokens exhausted the quota -- 110
+    rate limits with the pacer pinned at its ceiling. Derivation costs nothing
+    and halves the calls per token.
+    """
+    try:
+        return bonding_curve_address(mint, PUMP_PROGRAM), "derived locally"
+    except ValueError as exc:
+        return None, f"cannot derive from mint: {exc}"
+
+
 def find_bonding_curve(client: httpx.Client, rpc_url: str, mint: str,
                        timeout: float = 20.0,
                        pacer: Pacer | None = None) -> tuple[str | None, str]:
-    """The curve's address, via its token account rather than PDA arithmetic.
+    """Fallback for tokens whose curve is not at the derived address.
 
-    Deriving the PDA needs ed25519 point validation; the curve is also simply
-    the largest holder of its own token, so its address is the OWNER of the
-    biggest token account. Two calls, no cryptography, and it fails loudly
-    rather than guessing.
-
-    Resolved once per token and stored, so routine observations cost one call.
+    Kept for anything that is not a pump.fun bonding curve -- a graduated token
+    sitting in an AMM, for instance -- where the derived address holds nothing.
+    Two RPC calls, so only used when derivation has already failed.
     """
     try:
         body = _rpc(client, rpc_url, "getTokenLargestAccounts", [mint], timeout, pacer)
