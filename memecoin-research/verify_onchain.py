@@ -2,11 +2,13 @@
 
 Two questions, and the second is the point of the whole exercise.
 
-IS THE LAYOUT RIGHT? For tokens where DexScreener gave us a price, the on-chain
-price should match it closely. A systematic offset means the struct is being
-read wrong; scattered disagreement means one of the two sources is stale. The
-discriminator check already rules out reading a different account entirely, so
-this is about the fields inside it.
+IS THE LAYOUT RIGHT? Checked two ways, because the first run of this script
+found no token with both a DexScreener price and a readable curve and so proved
+nothing. The primary check is now internal: pump.fun seeds every curve with the
+same fictional reserves, so virtual_sol - real_sol is one constant on every
+live token, and a field read at the wrong offset cannot hold constant across
+tokens that differ in every other way. Where DexScreener does have a price, it
+is used as a second, independent confirmation.
 
 HOW MUCH MORE CAN WE SEE? The oracle found 1,282 tokens with no liquidity
 figure at all. If the chain gives a price for most of those, coverage goes from
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -28,12 +31,109 @@ from collector.config import load_settings
 from collector.pacing import Pacer
 from collector.models import Observation, Token
 from collector.onchain import (
+    WSOL_DECIMALS,
     _redact,
     curve_address,
     find_bonding_curve,
+    layout_evidence,
     read_curve,
     sol_price_usd,
 )
+
+
+def report(curves, agreed, disagreed, unreadable,
+           chain_only_funded, chain_only_empty) -> int:
+    """Print the conclusions. One function owns the verdict.
+
+    The previous version printed a verdict inside the DexScreener section and
+    another at the end, which could disagree -- and separately printed "the
+    chain shows more tokens, which is the whole point" on a sample of three
+    tokens holding no SOL at all. Both are the same failure: a conclusion
+    drawn wider than the evidence under it.
+    """
+    total = len(agreed) + len(disagreed)
+
+    print("\n" + "=" * 70)
+    print("DOES THE LAYOUT READ CORRECTLY? (from the curves themselves)")
+    print("=" * 70)
+    if curves:
+        print("  raw fields, as parsed:")
+        for c in curves[:6]:
+            print(f"    vSOL {c.virtual_sol_reserves / 10 ** WSOL_DECIMALS:>11,.4f}"
+                  f"  rSOL {c.real_sol_reserves / 10 ** WSOL_DECIMALS:>9,.4f}"
+                  f"  vTok {c.virtual_token_reserves / 10 ** 6:>15,.0f}"
+                  f"  rTok {c.real_token_reserves / 10 ** 6:>15,.0f}"
+                  f"  supply {c.token_total_supply / 10 ** 6:>13,.0f}"
+                  f"  complete {c.complete}")
+        print()
+    evidence = layout_evidence(curves)
+    for check in evidence:
+        print(f"  [{'PASS' if check.passed else 'FAIL'}] {check.name}")
+        print(f"         {check.detail}")
+    internally_sound = bool(curves) and all(c.passed for c in evidence)
+
+    print("\n" + "=" * 70)
+    print("DOES IT AGREE WITH DEXSCREENER? (independent second source)")
+    print("=" * 70)
+    if not total:
+        print("  Unavailable: no token had both a DexScreener price and a")
+        print("  readable curve. It needs a token the aggregator indexed AND")
+        print("  whose curve has not graduated, which is rare in a small recent")
+        print("  sample because indexing lags the launch. Absence of this check")
+        print("  is not a failure of the layout, and not a pass either.")
+    else:
+        print(f"  {len(agreed)} of {total} within 25% of DexScreener "
+              f"({len(agreed) / total * 100:.0f}%)")
+        if disagreed:
+            ratios = sorted(r[3] for r in disagreed)
+            print(f"  {len(disagreed)} disagreed, ratios {ratios[0]:.2f} "
+                  f"to {ratios[-1]:.2f}")
+            # A consistent multiple is a decimals or field-order error; scatter
+            # is staleness in one source or the other.
+            if max(ratios) / max(min(ratios), 1e-9) < 1.5:
+                print("  They cluster around one multiple, which points at a")
+                print("  decimals or field-order error rather than stale data.")
+
+    print("\n" + "=" * 70)
+    print("HOW MUCH MORE CAN WE SEE?")
+    print("=" * 70)
+    chain_only = chain_only_funded + chain_only_empty
+    readable = total + chain_only
+    sampled = readable + len(unreadable)
+    print(f"  readable on chain              {readable:>4} of {sampled}")
+    print(f"  of which DexScreener had too   {total:>4}")
+    print(f"  CHAIN ONLY, SOL in the curve   {chain_only_funded:>4}  "
+          f"<- genuinely new coverage")
+    print(f"  CHAIN ONLY, curve is empty     {chain_only_empty:>4}  "
+          f"<- visible, but nothing to sell into")
+    if unreadable:
+        print(f"\n  {len(unreadable)} could not be read on chain either:")
+        for reason, n in Counter(r for _, r in unreadable).most_common(4):
+            print(f"    {n:>4}  {reason[:200]}")
+        print("\n  'account does not exist' at the derived address means the")
+        print("  token is not a pump.fun launch -- a Raydium pool, or another")
+        print("  launchpad. Those need a different reader, not this one.")
+
+    print("\n" + "=" * 70)
+    print("VERDICT")
+    print("=" * 70)
+    if not internally_sound:
+        print("  LAYOUT NOT CONFIRMED. Do not wire this into the collector.")
+    elif total and len(agreed) < total * 0.8:
+        print("  LAYOUT NOT CONFIRMED. The invariants hold but DexScreener")
+        print("  disagrees, and two sources disagreeing is unresolved, not a")
+        print("  pass. Find out which is wrong first.")
+    else:
+        print("  LAYOUT CONFIRMED by the internal invariants"
+              + (" and by DexScreener." if total else ", with no second source."))
+        print("\n  What that does NOT establish: that the coverage gain is")
+        print("  tradable. A curve we can now read is not a curve we could")
+        print(f"  have sold into. Of the {chain_only} tokens only the chain sees, "
+              f"{chain_only_funded}")
+        print("  hold any SOL at all. The rest become visible but stay")
+        print("  unsellable, so they cannot rescue a return -- they can only")
+        print("  make the loss rate honest, which is still worth having.")
+    return 0
 
 
 def main() -> int:
@@ -64,12 +164,33 @@ def main() -> int:
             print(f"SOL = ${sol_usd:,.2f}\n")
 
         cutoff = datetime.now(UTC) - timedelta(hours=args.hours)
-        tokens = session.scalars(
-            select(Token).where(Token.detected_ts >= cutoff)
-            .order_by(Token.detected_ts.desc()).limit(args.limit)).all()
+
+        # Sample deliberately, in two halves. The first run took the 15 most
+        # recent tokens and got 10 non-pump.fun launches plus 3 curves nobody
+        # had ever bought -- useless for both questions. Tokens the aggregator
+        # priced are tokens somebody traded, which is what the seed invariant
+        # needs and the only place a DexScreener cross-check can happen.
+        # Tokens it never priced are the ones that measure the coverage gain.
+        half = max(1, args.limit // 2)
+        priced_ids = select(Observation.token_id).where(
+            Observation.price_usd.is_not(None)).distinct().scalar_subquery()
+        traded = session.scalars(
+            select(Token).where(Token.detected_ts >= cutoff,
+                                Token.id.in_(priced_ids))
+            .order_by(Token.detected_ts.desc()).limit(half)).all()
+        unpriced = session.scalars(
+            select(Token).where(Token.detected_ts >= cutoff,
+                                Token.id.not_in(priced_ids))
+            .order_by(Token.detected_ts.desc())
+            .limit(args.limit - len(traded))).all()
+        tokens = list(traded) + list(unpriced)
+        print(f"sampling {len(traded)} tokens DexScreener priced and "
+              f"{len(unpriced)} it never did\n")
 
         pacer = Pacer()
-        agreed, disagreed, chain_only, unreadable = [], [], 0, []
+        agreed, disagreed, unreadable = [], [], []
+        curves = []
+        chain_only_funded, chain_only_empty = 0, 0
         for token in tokens:
             obs = session.scalars(
                 select(Observation)
@@ -108,11 +229,15 @@ def main() -> int:
                 continue
             chain_usd = price_sol * sol_usd if sol_usd else None
 
+            curves.append(curve)
             if dex_price is None:
-                chain_only += 1
+                if curve.extractable_sol() > 0:
+                    chain_only_funded += 1
+                else:
+                    chain_only_empty += 1
                 extra = (f"  ${chain_usd:.3e}" if chain_usd else "")
                 print(f"  {token.address[:12]}... CHAIN ONLY{extra}  "
-                      f"{curve.extractable_sol():.2f} SOL extractable"
+                      f"{curve.extractable_sol():.4f} SOL extractable"
                       f"{'  [graduated]' if curve.complete else ''}")
                 continue
 
@@ -129,46 +254,10 @@ def main() -> int:
 
     print(f"\n  pacing ended at {pacer.delay:.2f}s after {pacer.throttles} "
           f"rate limits")
-    total = len(agreed) + len(disagreed)
-    print("\n" + "=" * 70)
-    print("DOES THE LAYOUT READ CORRECTLY?")
-    print("=" * 70)
-    if not total:
-        print("  No token had both a DexScreener price and a readable curve.")
-    else:
-        print(f"  {len(agreed)} of {total} within 25% of DexScreener "
-              f"({len(agreed) / total * 100:.0f}%)")
-        if disagreed:
-            ratios = sorted(r[3] for r in disagreed)
-            print(f"  {len(disagreed)} disagreed, ratios {ratios[0]:.2f} "
-                  f"to {ratios[-1]:.2f}")
-            # A consistent multiple is a decimals or field-order error; scatter
-            # is staleness in one source or the other.
-            if ratios and max(ratios) / max(min(ratios), 1e-9) < 1.5:
-                print("  They are clustered around one multiple, which points at a")
-                print("  decimals or field-order error rather than stale data.")
-        if len(agreed) >= total * 0.8:
-            print("\n  LAYOUT CONFIRMED. The on-chain price can be trusted.")
-        else:
-            print("\n  LAYOUT NOT CONFIRMED. Do not wire this in yet.")
+    return report(curves, agreed, disagreed, unreadable,
+                  chain_only_funded, chain_only_empty)
 
-    print("\n" + "=" * 70)
-    print("HOW MUCH MORE CAN WE SEE?")
-    print("=" * 70)
-    readable = total + chain_only
-    sampled = readable + len(unreadable)
-    print(f"  readable on chain      {readable:>4} of {sampled}")
-    print(f"  of which DexScreener   {total:>4}")
-    print(f"  CHAIN ONLY             {chain_only:>4}  <- invisible to us today")
-    if unreadable:
-        print(f"\n  {len(unreadable)} could not be read on chain either:")
-        from collections import Counter
-        for reason, n in Counter(r for _, r in unreadable).most_common(4):
-            print(f"    {n:>4}  {reason[:200]}")
-    if chain_only > total:
-        print("\n  The chain shows more tokens than the aggregator does, which is")
-        print("  the whole point: every measurement so far was taken on the")
-        print("  indexed minority.")
+
     return 0
 
 

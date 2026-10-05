@@ -91,9 +91,118 @@ def parse_bonding_curve(data_base64: str) -> BondingCurve:
             f"discriminator {discriminator.hex()} is not a BondingCurve "
             f"({BONDING_CURVE_DISCRIMINATOR.hex()}); the layout assumption is "
             f"wrong and nothing below it can be trusted")
+    # An Anchor bool is 0 or 1. Any other byte here means the five u64 fields
+    # above it are the wrong width or the wrong order, and a misaligned read
+    # lands on a legal bool only 2 times in 256.
+    if complete not in (0, 1):
+        raise LayoutMismatch(
+            f"the byte after five u64s is {complete}, which is not a bool; "
+            f"the field widths or order are wrong")
     return BondingCurve(virtual_token_reserves=vt, virtual_sol_reserves=vs,
                         real_token_reserves=rt, real_sol_reserves=rs,
                         token_total_supply=supply, complete=bool(complete))
+
+
+# pump.fun seeds every curve with the same fictional reserves and the same
+# supply. These are the documented values, but the check below does not rest on
+# them being right: what carries the proof is that the SAME number comes out of
+# every token, which a misread field cannot do.
+PUMPFUN_VIRTUAL_SOL_SEED = 30_000_000_000
+PUMPFUN_TOKEN_TOTAL_SUPPLY = 1_000_000_000_000_000
+
+
+@dataclass(frozen=True)
+class LayoutCheck:
+    name: str
+    passed: bool
+    detail: str
+
+
+def layout_evidence(curves: list[BondingCurve]) -> list[LayoutCheck]:
+    """Judge whether the struct is read correctly, from the curves alone.
+
+    verify_onchain.py was built to cross-check the parse against DexScreener,
+    which only works on tokens the aggregator indexed -- and the first run
+    found no token with both, so it proved nothing at all. These checks need no
+    second source, no price oracle and no extra RPC call.
+
+    The load-bearing one is INVARIANCE. pump.fun seeds every curve with the
+    same fictional reserves and real trades add on top, so
+    virtual_sol - real_sol is the same constant on every live curve. A u64 read
+    at the wrong offset cannot produce one identical constant across tokens
+    that differ in every other respect; it would scatter.
+    """
+    checks: list[LayoutCheck] = []
+    if not curves:
+        return [LayoutCheck("any data", False, "no curve was read")]
+
+    live = [c for c in curves if not c.complete]
+
+    def invariant(name: str, values: list[int], expected: int | None,
+                  scale: int, unit: str) -> None:
+        uniq = sorted(set(values))
+        shown = ", ".join(f"{v / scale:,.9g}" for v in uniq[:3])
+        if len(uniq) != 1:
+            checks.append(LayoutCheck(
+                name, False,
+                f"{len(uniq)} different values across {len(values)} curves "
+                f"({shown}{', ...' if len(uniq) > 3 else ''}) {unit} -- a "
+                f"constant was expected, so the offset is wrong"))
+            return
+        got = uniq[0]
+        if expected is not None and got != expected:
+            checks.append(LayoutCheck(
+                name, False,
+                f"constant across all {len(values)} curves at {got / scale:,.9g} "
+                f"{unit}, but pump.fun documents {expected / scale:,.9g} -- "
+                f"one constant means the offset is probably right and the "
+                f"documented figure stale, so confirm before trusting it"))
+            return
+        checks.append(LayoutCheck(
+            name, True,
+            f"{got / scale:,.9g} {unit} on all {len(values)} curves"))
+
+    # The invariant only has teeth if the curves actually differ. A curve
+    # nobody has bought sits at the initial state with real_sol == 0, so
+    # virtual - real is trivially identical across any number of untouched
+    # tokens no matter where the fields are read from. The first live run
+    # returned exactly that: three curves, 0.00 SOL in every one.
+    traded = sorted({c.real_sol_reserves for c in live})
+    if len(traded) >= 2:
+        invariant("virtual SOL seed is one constant",
+                  [c.virtual_sol_reserves - c.real_sol_reserves for c in live],
+                  PUMPFUN_VIRTUAL_SOL_SEED, 10 ** WSOL_DECIMALS, "SOL")
+        invariant("virtual token seed is one constant",
+                  [c.virtual_token_reserves - c.real_token_reserves
+                   for c in live],
+                  None, 10 ** 6, "tokens")
+    elif not live:
+        checks.append(LayoutCheck(
+            "virtual SOL seed is one constant", False,
+            f"all {len(curves)} curves read were already graduated, so the "
+            f"seed invariant cannot be tested"))
+    else:
+        checks.append(LayoutCheck(
+            "virtual SOL seed is one constant", False,
+            f"all {len(live)} live curves hold the same "
+            f"{traded[0] / 10 ** WSOL_DECIMALS:,.4f} SOL, so they are at one "
+            f"state and the difference is identical whatever the offsets are. "
+            f"The check needs curves with DIFFERENT real SOL -- tokens "
+            f"somebody actually bought"))
+
+    invariant("total supply is one constant",
+              [c.token_total_supply for c in curves],
+              PUMPFUN_TOKEN_TOTAL_SUPPLY, 10 ** 6, "tokens")
+
+    bad = [c for c in curves
+           if c.virtual_sol_reserves < c.real_sol_reserves
+           or c.virtual_token_reserves < c.real_token_reserves]
+    checks.append(LayoutCheck(
+        "virtual reserves exceed real", not bad,
+        f"holds on all {len(curves)} curves" if not bad
+        else f"{len(bad)} curves have more real than virtual reserves, which "
+             f"is impossible and means the pairs are transposed"))
+    return checks
 
 
 class RpcError(RuntimeError):

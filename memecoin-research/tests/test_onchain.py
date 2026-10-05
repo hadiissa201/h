@@ -105,3 +105,105 @@ def test_the_discriminator_is_derived_not_pasted():
     import hashlib
     assert BONDING_CURVE_DISCRIMINATOR == hashlib.sha256(
         b"account:BondingCurve").digest()[:8]
+
+
+# ------------------------------------------------------ the bool is a bool
+def test_a_non_boolean_complete_byte_is_refused():
+    """A misaligned read lands on a legal bool only 2 times in 256, so this
+    byte is the cheapest check that the five u64s above it are the right
+    widths in the right order. Without it, struct.unpack accepts anything and
+    bool(7) is silently True."""
+    with pytest.raises(LayoutMismatch, match="not a bool"):
+        parse_bonding_curve(account(complete=7))
+
+
+def test_both_legal_bool_values_still_parse():
+    assert parse_bonding_curve(account(complete=0)).complete is False
+    assert parse_bonding_curve(account(complete=1)).complete is True
+
+
+# ------------------------------------------- judging the layout without a second source
+def curve(**kw):
+    return parse_bonding_curve(account(**kw))
+
+
+def checks(curves):
+    from collector.onchain import layout_evidence
+    return {c.name: c for c in layout_evidence(curves)}
+
+
+def test_no_curves_is_not_silently_a_pass():
+    """The first real run read three curves and zero DexScreener prices, and
+    the old script printed a paragraph implying success. An empty or absent
+    sample must never read as confirmation."""
+    from collector.onchain import layout_evidence
+    result = layout_evidence([])
+    assert result and not any(c.passed for c in result)
+
+
+def test_a_constant_sol_seed_across_differing_curves_passes():
+    """The load-bearing check: real buys differ, the fictional seed does not."""
+    got = checks([
+        curve(virtual_sol=30_000_000_000, real_sol=0),
+        curve(virtual_sol=34_000_000_000, real_sol=4_000_000_000),
+        curve(virtual_sol=41_500_000_000, real_sol=11_500_000_000),
+    ])
+    assert got["virtual SOL seed is one constant"].passed
+
+
+def test_a_scattered_sol_seed_fails_because_that_is_a_wrong_offset():
+    got = checks([
+        curve(virtual_sol=30_000_000_000, real_sol=0),
+        curve(virtual_sol=34_000_000_000, real_sol=1_000_000_000),
+    ])
+    check = got["virtual SOL seed is one constant"]
+    assert not check.passed
+    assert "offset is wrong" in check.detail
+
+
+def test_a_constant_that_contradicts_the_documented_seed_is_flagged_not_passed():
+    """One constant means the offset is probably right, but if it is not the
+    documented 30 SOL then something is unexplained, and an unexplained
+    constant must not be reported as a confirmation."""
+    got = checks([
+        curve(virtual_sol=99_000_000_000, real_sol=0),
+        curve(virtual_sol=99_500_000_000, real_sol=500_000_000),
+    ])
+    check = got["virtual SOL seed is one constant"]
+    assert not check.passed
+    assert "documents" in check.detail
+
+
+def test_graduated_only_sample_cannot_test_the_seed_and_says_so():
+    """A graduated curve has been drained, so the invariant does not hold and
+    its absence is not evidence either way."""
+    got = checks([curve(complete=1), curve(complete=1)])
+    check = got["virtual SOL seed is one constant"]
+    assert not check.passed
+    assert "graduated" in check.detail
+
+
+def test_transposed_reserve_pairs_are_caught():
+    got = checks([curve(virtual_sol=1_000_000_000, real_sol=9_000_000_000)])
+    assert not got["virtual reserves exceed real"].passed
+
+
+def test_a_varying_total_supply_fails():
+    got = checks([curve(supply=1_000_000_000_000_000),
+                  curve(supply=7_777_000_000_000)])
+    assert not got["total supply is one constant"].passed
+
+
+def test_untouched_curves_cannot_prove_the_invariant():
+    """The trap the first live run fell into: three curves, every one at
+    real_sol == 0, so virtual - real is identical no matter where the fields
+    are read from. Identical-by-construction is not evidence."""
+    got = checks([curve(real_sol=0), curve(real_sol=0), curve(real_sol=0)])
+    check = got["virtual SOL seed is one constant"]
+    assert not check.passed
+    assert "DIFFERENT real SOL" in check.detail
+
+
+def test_one_curve_alone_cannot_prove_the_invariant():
+    got = checks([curve(real_sol=5_000_000_000)])
+    assert not got["virtual SOL seed is one constant"].passed

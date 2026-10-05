@@ -1,0 +1,90 @@
+"""The report must not draw a conclusion wider than the evidence under it.
+
+The first real run of the verifier read three curves, matched zero DexScreener
+prices, and still printed "the chain shows more tokens than the aggregator
+does, which is the whole point" -- about three tokens holding 0.00 SOL. The
+layout was unconfirmed and the coverage gain was unsellable, and neither fact
+reached the summary. These tests pin the summary to the data.
+"""
+
+from __future__ import annotations
+
+import base64
+import struct
+
+from collector.onchain import BONDING_CURVE_DISCRIMINATOR, parse_bonding_curve
+from verify_onchain import report
+
+
+def curve(virtual_sol=30_000_000_000, real_sol=0, complete=0,
+          virtual_tokens=1_073_000_191_000_000,
+          real_tokens=793_100_000_000_000,
+          supply=1_000_000_000_000_000):
+    raw = struct.pack("<8s5QB", BONDING_CURVE_DISCRIMINATOR, virtual_tokens,
+                      virtual_sol, real_tokens, real_sol, supply, complete)
+    return parse_bonding_curve(base64.b64encode(raw).decode())
+
+
+def run(capsys, curves, agreed=(), disagreed=(), unreadable=(),
+        funded=0, empty=0):
+    report(list(curves), list(agreed), list(disagreed), list(unreadable),
+           funded, empty)
+    return capsys.readouterr().out
+
+
+def test_the_actual_first_run_is_reported_as_unconfirmed(capsys):
+    """Three curves, no second source, all holding zero SOL -- the exact shape
+    of the run that came back from the user's machine. A single curve cannot
+    establish the invariant, so the layout is not confirmed."""
+    out = run(capsys, [curve()], unreadable=[("a", "account does not exist")],
+              empty=1)
+    assert "LAYOUT NOT CONFIRMED" in out
+
+
+def test_three_differing_curves_do_confirm_the_layout(capsys):
+    out = run(capsys, [curve(real_sol=0),
+                       curve(virtual_sol=34_000_000_000, real_sol=4_000_000_000),
+                       curve(virtual_sol=47_000_000_000, real_sol=17_000_000_000)],
+              funded=2, empty=1)
+    assert "LAYOUT CONFIRMED" in out
+    assert "no second source" in out
+
+
+def test_an_empty_curve_is_never_counted_as_tradable_coverage(capsys):
+    out = run(capsys, [curve(real_sol=0),
+                       curve(virtual_sol=34_000_000_000, real_sol=4_000_000_000),
+                       curve(virtual_sol=47_000_000_000, real_sol=17_000_000_000)],
+              funded=1, empty=9)
+    assert "Of the 10 tokens only the chain sees, 1" in out
+    assert "unsellable" in out
+
+
+def test_missing_dexscreener_overlap_is_not_a_pass_and_not_a_failure(capsys):
+    out = run(capsys, [curve(real_sol=0),
+                       curve(virtual_sol=34_000_000_000, real_sol=4_000_000_000)])
+    assert "Unavailable" in out
+    assert "not a pass either" in out
+
+
+def test_disagreeing_sources_block_the_verdict_even_when_invariants_hold(capsys):
+    """Internal consistency plus an external contradiction is unresolved. The
+    old code printed CONFIRMED from the invariants and MISMATCH from
+    DexScreener in the same output."""
+    rows = [("mint", 1e-7, 9e-7, 9.0, 0.0, False)]
+    out = run(capsys, [curve(real_sol=0),
+                       curve(virtual_sol=34_000_000_000, real_sol=4_000_000_000)],
+              disagreed=rows)
+    assert "LAYOUT NOT CONFIRMED" in out
+    assert out.count("LAYOUT CONFIRMED") == 0
+
+
+def test_a_wrong_offset_shows_up_as_a_scattered_seed(capsys):
+    out = run(capsys, [curve(virtual_sol=30_000_000_000, real_sol=0),
+                       curve(virtual_sol=34_000_000_000, real_sol=1_000_000_000)])
+    assert "LAYOUT NOT CONFIRMED" in out
+    assert "offset is wrong" in out
+
+
+def test_reading_nothing_at_all_is_not_confirmation(capsys):
+    out = run(capsys, [], unreadable=[("a", "account does not exist")] * 15)
+    assert "LAYOUT NOT CONFIRMED" in out
