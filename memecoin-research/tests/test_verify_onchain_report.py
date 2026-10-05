@@ -88,3 +88,25 @@ def test_a_wrong_offset_shows_up_as_a_scattered_seed(capsys):
 def test_reading_nothing_at_all_is_not_confirmation(capsys):
     out = run(capsys, [], unreadable=[("a", "account does not exist")] * 15)
     assert "LAYOUT NOT CONFIRMED" in out
+
+
+# --------------------------------------------- the database-free layout check
+def test_an_undecodable_mint_is_reported_without_touching_the_network(capsys):
+    """curve_address derives locally, so a malformed mint must fail before any
+    RPC call. If this ever makes a request, the no-network guarantee is gone."""
+    from verify_onchain import check_mints
+    rc = check_mints(["not-a-valid-base58-mint-!!!"], "http://127.0.0.1:1")
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "LAYOUT NOT CONFIRMED" in out
+    assert "cannot derive from mint" in out
+
+
+def test_empty_mints_argument_exits_nonzero(monkeypatch, capsys):
+    import sys as _sys
+
+    import verify_onchain
+    monkeypatch.setattr(_sys, "argv",
+                        ["verify_onchain.py", "--mints", " , ",
+                         "--rpc", "http://127.0.0.1:1"])
+    assert verify_onchain.main() == 1

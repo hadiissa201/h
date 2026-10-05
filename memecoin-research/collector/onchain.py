@@ -225,10 +225,22 @@ def _rpc(client: httpx.Client, url: str, method: str, params: list,
     the quota is spent, or the host is wrong -- three problems with three
     different fixes.
     """
+    resp = None
     for attempt in range(attempts):
-        resp = client.post(url, json={"jsonrpc": "2.0", "id": 1,
-                                      "method": method, "params": params},
-                           timeout=timeout)
+        try:
+            resp = client.post(url, json={"jsonrpc": "2.0", "id": 1,
+                                          "method": method, "params": params},
+                               timeout=timeout)
+        except httpx.TransportError as exc:
+            # DNS and connection failures are transient and were not retried,
+            # so one getaddrinfo hiccup discarded a token -- and on the first
+            # call of a run it killed the whole script with a bare traceback.
+            if attempt == attempts - 1:
+                raise RpcError(
+                    f"{type(exc).__name__} reaching {_redact(url)} after "
+                    f"{attempts} attempts: {exc}") from None
+            time.sleep(1.0 * (attempt + 1))
+            continue
         if resp.status_code != 429:
             break
         # Refused, not broken. Back off and try again rather than discarding a
@@ -237,6 +249,8 @@ def _rpc(client: httpx.Client, url: str, method: str, params: list,
             pacer.saw_429(resp.headers.get("Retry-After"))
         elif attempt < attempts - 1:
             time.sleep(2.0 * (attempt + 1))
+    if resp is None:
+        raise RpcError(f"no response from {_redact(url)}")
     if pacer is not None and resp.status_code != 429:
         pacer.saw_success()
     try:

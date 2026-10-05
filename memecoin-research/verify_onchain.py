@@ -136,6 +136,46 @@ def report(curves, agreed, disagreed, unreadable,
     return 0
 
 
+def check_mints(mints: list[str], rpc_url: str) -> int:
+    """Confirm the layout against mints named on the command line.
+
+    Sampling our own database cannot answer this question right now. The
+    collector is stopped, so the newest tokens it holds are days old, and a
+    week-old pump.fun curve has either graduated or been drained -- real_sol is
+    0 either way, which is exactly the state the invariant cannot be tested in.
+
+    The distinction that took three failed runs to see: the COVERAGE question
+    needs a sample with no selection bias, because it is a claim about the
+    population. The LAYOUT question does not. It is a claim about a struct, so
+    any five curves somebody has traded will settle it, however they were
+    chosen. Insisting on an unbiased sample for both is what kept this
+    unverified.
+    """
+    print(f"RPC endpoint: {_redact(rpc_url)}")
+    print(f"reading {len(mints)} mints named on the command line\n")
+    curves, unreadable = [], []
+    pacer = Pacer()
+    with httpx.Client() as client:
+        for mint in mints:
+            address, note = curve_address(mint)
+            if address is None:
+                unreadable.append((mint, note))
+                continue
+            pacer.wait()
+            curve, detail = read_curve(client, rpc_url, address, pacer=pacer)
+            if curve is None:
+                unreadable.append((mint, detail))
+                print(f"  {mint[:12]}... unreadable: {detail[:120]}")
+                continue
+            curves.append(curve)
+            print(f"  {mint[:12]}... {curve.extractable_sol():>9,.4f} SOL "
+                  f"extractable"
+                  f"{'  [graduated]' if curve.complete else ''}")
+    print(f"\n  pacing ended at {pacer.delay:.2f}s after {pacer.throttles} "
+          f"rate limits")
+    return report(curves, [], [], unreadable, 0, 0)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=40)
@@ -146,10 +186,24 @@ def main() -> int:
                              "paid key is out of credits -- it is slower and "
                              "drops requests, but verification needs only a "
                              "few dozen cheap reads")
+    parser.add_argument("--mints", default=None,
+                        help="comma-separated mint addresses to check instead "
+                             "of sampling the database. Use this for the "
+                             "layout check: it needs curves somebody has "
+                             "traded, which a stopped collector cannot "
+                             "supply, and the layout question does not care "
+                             "how the mints were chosen")
     args = parser.parse_args()
 
     settings = load_settings()
     rpc_url = args.rpc or settings.rpc_url
+    if args.mints:
+        mints = [m.strip() for m in args.mints.split(",") if m.strip()]
+        if not mints:
+            print("--mints was empty")
+            return 1
+        return check_mints(mints, rpc_url)
+
     engine = create_engine(settings.database_url, future=True)
 
     with Session(engine) as session, httpx.Client() as client:
