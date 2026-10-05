@@ -40,16 +40,26 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=40)
     parser.add_argument("--hours", type=float, default=48.0)
+    parser.add_argument("--rpc", default=None,
+                        help="override the RPC endpoint. Use "
+                             "https://api.mainnet-beta.solana.com when the "
+                             "paid key is out of credits -- it is slower and "
+                             "drops requests, but verification needs only a "
+                             "few dozen cheap reads")
     args = parser.parse_args()
 
     settings = load_settings()
+    rpc_url = args.rpc or settings.rpc_url
     engine = create_engine(settings.database_url, future=True)
 
     with Session(engine) as session, httpx.Client() as client:
-        print(f"RPC endpoint: {_redact(settings.rpc_url)}")
+        print(f"RPC endpoint: {_redact(rpc_url)}")
         sol_usd = sol_price_usd(client, settings.jupiter_quote_url)
         if sol_usd is None:
-            print("Could not price SOL; dollar comparisons will be skipped.\n")
+            print("Could not price SOL; dollar comparisons will be skipped.")
+            print("If the RPC is also refusing, the key is likely out of "
+                  "credits rather than\nbeing hit too fast -- pacing cannot "
+                  "fix a spent budget.\n")
         else:
             print(f"SOL = ${sol_usd:,.2f}\n")
 
@@ -75,17 +85,17 @@ def main() -> int:
                 unreadable.append((token.address, note))
                 continue
             pacer.wait()
-            curve, detail = read_curve(client, settings.rpc_url, address,
+            curve, detail = read_curve(client, rpc_url, address,
                                        pacer=pacer)
             if curve is None and "does not exist" in detail:
                 # Not at the derived address -- graduated, or not a pump.fun
                 # curve. Fall back to the expensive lookup for just these.
                 pacer.wait()
-                fallback, note = find_bonding_curve(client, settings.rpc_url,
+                fallback, note = find_bonding_curve(client, rpc_url,
                                                     token.address, pacer=pacer)
                 if fallback:
                     pacer.wait()
-                    curve, detail = read_curve(client, settings.rpc_url,
+                    curve, detail = read_curve(client, rpc_url,
                                                fallback, pacer=pacer)
             if curve is None:
                 unreadable.append((token.address, detail))
@@ -154,7 +164,7 @@ def main() -> int:
         print(f"\n  {len(unreadable)} could not be read on chain either:")
         from collections import Counter
         for reason, n in Counter(r for _, r in unreadable).most_common(4):
-            print(f"    {n:>4}  {reason[:60]}")
+            print(f"    {n:>4}  {reason[:200]}")
     if chain_only > total:
         print("\n  The chain shows more tokens than the aggregator does, which is")
         print("  the whole point: every measurement so far was taken on the")
