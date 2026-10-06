@@ -31,7 +31,9 @@ from collector.config import load_settings
 from collector.pacing import Pacer
 from collector.models import Observation, Token
 from collector.onchain import (
+    MIN_SELLABLE_SOL,
     WSOL_DECIMALS,
+    anomalies,
     _redact,
     curve_address,
     find_bonding_curve,
@@ -42,7 +44,7 @@ from collector.onchain import (
 
 
 def report(curves, agreed, disagreed, unreadable,
-           chain_only_funded, chain_only_empty) -> int:
+           chain_only_funded, chain_only_empty, migrated=0) -> int:
     """Print the conclusions. One function owns the verdict.
 
     The previous version printed a verdict inside the DexScreener section and
@@ -64,6 +66,7 @@ def report(curves, agreed, disagreed, unreadable,
                   f"  vTok {c.virtual_token_reserves / 10 ** 6:>15,.0f}"
                   f"  rTok {c.real_token_reserves / 10 ** 6:>15,.0f}"
                   f"  supply {c.token_total_supply / 10 ** 6:>13,.0f}"
+                  f"  {c.raw_len}B"
                   f"  complete {c.complete}")
         print()
     evidence = layout_evidence(curves)
@@ -71,6 +74,13 @@ def report(curves, agreed, disagreed, unreadable,
         print(f"  [{'PASS' if check.passed else 'FAIL'}] {check.name}")
         print(f"         {check.detail}")
     internally_sound = bool(curves) and all(c.passed for c in evidence)
+
+    odd = anomalies(curves)
+    if odd:
+        print("\n  ANOMALIES (open questions about those tokens, not about")
+        print("  the parse -- the checks above already settled that):")
+        for line in odd[:5]:
+            print(f"    {line}")
 
     print("\n" + "=" * 70)
     print("DOES IT AGREE WITH DEXSCREENER? (independent second source)")
@@ -102,10 +112,17 @@ def report(curves, agreed, disagreed, unreadable,
     sampled = readable + len(unreadable)
     print(f"  readable on chain              {readable:>4} of {sampled}")
     print(f"  of which DexScreener had too   {total:>4}")
-    print(f"  CHAIN ONLY, SOL in the curve   {chain_only_funded:>4}  "
+    print(f"  CHAIN ONLY, over {MIN_SELLABLE_SOL} SOL     {chain_only_funded:>4}  "
           f"<- genuinely new coverage")
-    print(f"  CHAIN ONLY, curve is empty     {chain_only_empty:>4}  "
+    print(f"  CHAIN ONLY, dust or empty      {chain_only_empty:>4}  "
           f"<- visible, but nothing to sell into")
+    if migrated:
+        print(f"  curve exists but is zeroed     {migrated:>4}  "
+              f"<- pump.fun tokens that LEFT the curve")
+        print("\n  A zeroed curve is a graduated token: it is a pump.fun")
+        print("  launch, so this reader found it, but its price now lives in")
+        print("  an AMM pool. Reading those needs a second reader, and they")
+        print("  are the survivors, so they are worth having.")
     if unreadable:
         print(f"\n  {len(unreadable)} could not be read on chain either:")
         for reason, n in Counter(r for _, r in unreadable).most_common(4):
@@ -125,15 +142,22 @@ def report(curves, agreed, disagreed, unreadable,
         print("  disagrees, and two sources disagreeing is unresolved, not a")
         print("  pass. Find out which is wrong first.")
     else:
-        print("  LAYOUT CONFIRMED by the internal invariants"
-              + (" and by DexScreener." if total else ", with no second source."))
-        print("\n  What that does NOT establish: that the coverage gain is")
-        print("  tradable. A curve we can now read is not a curve we could")
-        print(f"  have sold into. Of the {chain_only} tokens only the chain sees, "
-              f"{chain_only_funded}")
-        print("  hold any SOL at all. The rest become visible but stay")
-        print("  unsellable, so they cannot rescue a return -- they can only")
-        print("  make the loss rate honest, which is still worth having.")
+        print("  LAYOUT CONFIRMED against pump.fun's documented launch state"
+              + (" and by DexScreener." if total else ","))
+        if not total:
+            print("  with no second source.")
+        print("\n  Two things that does NOT establish.")
+        print("\n  One: that real_sol_reserves reads correctly in anger. Its")
+        print("  position is pinned by the launch state, but every curve read")
+        print("  so far held zero, so the field that caps a real exit has")
+        print("  never been observed non-zero. One traded curve settles it.")
+        print("\n  Two: that the coverage gain is tradable. A curve we can")
+        print(f"  read is not a curve we could sell into. Of the {chain_only} tokens")
+        print(f"  only the chain sees, {chain_only_funded} hold more than "
+              f"{MIN_SELLABLE_SOL} SOL. The rest")
+        print("  become visible but stay unsellable, so they cannot rescue a")
+        print("  return -- they can only make the loss rate honest, which is")
+        print("  still worth having.")
     return 0
 
 
@@ -265,7 +289,7 @@ def main() -> int:
         pacer = Pacer()
         agreed, disagreed, unreadable = [], [], []
         curves = []
-        chain_only_funded, chain_only_empty = 0, 0
+        chain_only_funded, chain_only_empty, migrated = 0, 0, 0
         for token in tokens:
             obs = session.scalars(
                 select(Observation)
@@ -300,13 +324,17 @@ def main() -> int:
             decimals = token.decimals if token.decimals is not None else 6
             price_sol = curve.price_sol(decimals)
             if price_sol is None:
-                unreadable.append((token.address, "curve has no usable reserves"))
+                # The account parsed but its reserves are zeroed, which is what
+                # graduation leaves behind. Lumping this in with "unreadable"
+                # discarded the single most useful group in the sample: the
+                # tokens that survived long enough to leave the curve.
+                migrated += 1
                 continue
             chain_usd = price_sol * sol_usd if sol_usd else None
 
             curves.append(curve)
             if dex_price is None:
-                if curve.extractable_sol() > 0:
+                if curve.extractable_sol() >= MIN_SELLABLE_SOL:
                     chain_only_funded += 1
                 else:
                     chain_only_empty += 1
@@ -330,7 +358,7 @@ def main() -> int:
     print(f"\n  pacing ended at {pacer.delay:.2f}s after {pacer.throttles} "
           f"rate limits")
     return report(curves, agreed, disagreed, unreadable,
-                  chain_only_funded, chain_only_empty)
+                  chain_only_funded, chain_only_empty, migrated)
 
 
     return 0

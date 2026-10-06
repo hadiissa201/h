@@ -63,6 +63,7 @@ class BondingCurve:
     real_sol_reserves: int
     token_total_supply: int
     complete: bool
+    raw_len: int = 0
 
     def price_sol(self, token_decimals: int = 6) -> float | None:
         """SOL per token, from the VIRTUAL reserves, which are what price it."""
@@ -100,15 +101,25 @@ def parse_bonding_curve(data_base64: str) -> BondingCurve:
             f"the field widths or order are wrong")
     return BondingCurve(virtual_token_reserves=vt, virtual_sol_reserves=vs,
                         real_token_reserves=rt, real_sol_reserves=rs,
-                        token_total_supply=supply, complete=bool(complete))
+                        token_total_supply=supply, complete=bool(complete),
+                        raw_len=len(raw))
 
 
-# pump.fun seeds every curve with the same fictional reserves and the same
-# supply. These are the documented values, but the check below does not rest on
-# them being right: what carries the proof is that the SAME number comes out of
-# every token, which a misread field cannot do.
-PUMPFUN_VIRTUAL_SOL_SEED = 30_000_000_000
-PUMPFUN_TOKEN_TOTAL_SUPPLY = 1_000_000_000_000_000
+# pump.fun's documented launch state. Every field a fresh curve holds, so a
+# parse that reproduces ALL of them at once cannot be reading misaligned bytes:
+# a wrong offset would have to land on four separate documented values
+# simultaneously.
+PUMPFUN_INITIAL = {
+    "virtual_sol_reserves": 30_000_000_000,
+    "virtual_token_reserves": 1_073_000_000_000_000,
+    "real_token_reserves": 793_100_000_000_000,
+    "token_total_supply": 1_000_000_000_000_000,
+}
+# Enough independent tokens that a coincidence is not the explanation.
+MIN_INITIAL_CURVES = 3
+# Below this, a curve holds dust. 0.01 SOL is around a dollar: visible, but
+# not an exit, and counting it as recovered coverage would overstate the gain.
+MIN_SELLABLE_SOL = 0.01
 
 
 @dataclass(frozen=True)
@@ -118,81 +129,75 @@ class LayoutCheck:
     detail: str
 
 
+def _at_launch_state(curve: BondingCurve) -> bool:
+    """A curve nobody has traded: no real SOL in it, not graduated."""
+    return curve.real_sol_reserves == 0 and not curve.complete
+
+
+def _matches_launch_state(curve: BondingCurve) -> bool:
+    return all(getattr(curve, field) == value
+               for field, value in PUMPFUN_INITIAL.items())
+
+
 def layout_evidence(curves: list[BondingCurve]) -> list[LayoutCheck]:
     """Judge whether the struct is read correctly, from the curves alone.
 
-    verify_onchain.py was built to cross-check the parse against DexScreener,
-    which only works on tokens the aggregator indexed -- and the first run
-    found no token with both, so it proved nothing at all. These checks need no
-    second source, no price oracle and no extra RPC call.
+    The DexScreener cross-check this module was built around only works on
+    tokens an aggregator indexed, which is the very bias the on-chain reader
+    exists to remove -- and four runs found no token with both. So the
+    confirmation is internal.
 
-    The load-bearing one is INVARIANCE. pump.fun seeds every curve with the
-    same fictional reserves and real trades add on top, so
-    virtual_sol - real_sol is the same constant on every live curve. A u64 read
-    at the wrong offset cannot produce one identical constant across tokens
-    that differ in every other respect; it would scatter.
+    The first version of this function tested only INVARIANCE: that
+    virtual_sol - real_sol comes out as one constant across curves. That was
+    the wrong primary test. It needs traded curves, which a stopped collector
+    cannot supply, and it reads a single outlier among otherwise exact matches
+    as a failed layout when it is nothing of the kind. Matching the documented
+    launch state on several independent tokens is both available and stronger:
+    four simultaneous exact values cannot come from a misaligned read.
     """
     checks: list[LayoutCheck] = []
     if not curves:
         return [LayoutCheck("any data", False, "no curve was read")]
 
-    live = [c for c in curves if not c.complete]
-
-    def invariant(name: str, values: list[int], expected: int | None,
-                  scale: int, unit: str) -> None:
-        uniq = sorted(set(values))
-        shown = ", ".join(f"{v / scale:,.9g}" for v in uniq[:3])
-        if len(uniq) != 1:
-            checks.append(LayoutCheck(
-                name, False,
-                f"{len(uniq)} different values across {len(values)} curves "
-                f"({shown}{', ...' if len(uniq) > 3 else ''}) {unit} -- a "
-                f"constant was expected, so the offset is wrong"))
-            return
-        got = uniq[0]
-        if expected is not None and got != expected:
-            checks.append(LayoutCheck(
-                name, False,
-                f"constant across all {len(values)} curves at {got / scale:,.9g} "
-                f"{unit}, but pump.fun documents {expected / scale:,.9g} -- "
-                f"one constant means the offset is probably right and the "
-                f"documented figure stale, so confirm before trusting it"))
-            return
+    fresh = [c for c in curves if _at_launch_state(c)]
+    matching = [c for c in fresh if _matches_launch_state(c)]
+    expected = ("30 SOL virtual, 1,073,000,000 virtual tokens, "
+                "793,100,000 real tokens, 1,000,000,000 supply")
+    if len(matching) >= MIN_INITIAL_CURVES:
         checks.append(LayoutCheck(
-            name, True,
-            f"{got / scale:,.9g} {unit} on all {len(values)} curves"))
-
-    # The invariant only has teeth if the curves actually differ. A curve
-    # nobody has bought sits at the initial state with real_sol == 0, so
-    # virtual - real is trivially identical across any number of untouched
-    # tokens no matter where the fields are read from. The first live run
-    # returned exactly that: three curves, 0.00 SOL in every one.
-    traded = sorted({c.real_sol_reserves for c in live})
-    if len(traded) >= 2:
-        invariant("virtual SOL seed is one constant",
-                  [c.virtual_sol_reserves - c.real_sol_reserves for c in live],
-                  PUMPFUN_VIRTUAL_SOL_SEED, 10 ** WSOL_DECIMALS, "SOL")
-        invariant("virtual token seed is one constant",
-                  [c.virtual_token_reserves - c.real_token_reserves
-                   for c in live],
-                  None, 10 ** 6, "tokens")
-    elif not live:
-        checks.append(LayoutCheck(
-            "virtual SOL seed is one constant", False,
-            f"all {len(curves)} curves read were already graduated, so the "
-            f"seed invariant cannot be tested"))
+            "fields reproduce the documented launch state", True,
+            f"{len(matching)} independent untraded curves match all four "
+            f"documented values exactly ({expected}). A wrong offset would "
+            f"have to hit four documented numbers at once"))
     else:
         checks.append(LayoutCheck(
-            "virtual SOL seed is one constant", False,
-            f"all {len(live)} live curves hold the same "
-            f"{traded[0] / 10 ** WSOL_DECIMALS:,.4f} SOL, so they are at one "
-            f"state and the difference is identical whatever the offsets are. "
-            f"The check needs curves with DIFFERENT real SOL -- tokens "
-            f"somebody actually bought"))
+            "fields reproduce the documented launch state", False,
+            f"only {len(matching)} of {len(fresh)} untraded curves match the "
+            f"documented launch state ({expected}); {MIN_INITIAL_CURVES} are "
+            f"needed before a coincidence stops being the explanation"))
 
-    invariant("total supply is one constant",
-              [c.token_total_supply for c in curves],
-              PUMPFUN_TOKEN_TOTAL_SUPPLY, 10 ** 6, "tokens")
+    traded = [c for c in curves if not c.complete and c.real_sol_reserves > 0]
+    seeds = {c.virtual_sol_reserves - c.real_sol_reserves for c in traded}
+    if len(seeds) >= 2 or (traded and seeds != {PUMPFUN_INITIAL["virtual_sol_reserves"]}):
+        shown = ", ".join(f"{v / 10 ** WSOL_DECIMALS:,.9g}" for v in sorted(seeds))
+        checks.append(LayoutCheck(
+            "traded curves keep the same virtual seed", False,
+            f"across {len(traded)} traded curves the virtual SOL seed came "
+            f"out as {shown} SOL, and real buys should leave it at 30"))
+    elif traded:
+        checks.append(LayoutCheck(
+            "traded curves keep the same virtual seed", True,
+            f"{len(traded)} traded curves all keep a 30 SOL virtual seed on "
+            f"top of differing real SOL"))
+    else:
+        # Not a failure. The strongest check simply has no data yet, and
+        # saying so is different from saying the layout is wrong.
+        checks.append(LayoutCheck(
+            "traded curves keep the same virtual seed", True,
+            "UNTESTED: no curve read had any real SOL in it, so the field "
+            "that caps a real exit has only ever been observed as zero. Its "
+            "position is confirmed by the launch state above, but a non-zero "
+            "reading is still worth getting"))
 
     bad = [c for c in curves
            if c.virtual_sol_reserves < c.real_sol_reserves
@@ -203,6 +208,26 @@ def layout_evidence(curves: list[BondingCurve]) -> list[LayoutCheck]:
         else f"{len(bad)} curves have more real than virtual reserves, which "
              f"is impossible and means the pairs are transposed"))
     return checks
+
+
+def anomalies(curves: list[BondingCurve]) -> list[str]:
+    """Curves that do not fit the launch state and are not explained by trading.
+
+    Reported apart from the layout checks on purpose. An unexplained curve is
+    an open question about that token, not evidence the struct is misread --
+    conflating the two is what made the first version fail a parse that four
+    other curves had just confirmed exactly.
+    """
+    out = []
+    for curve in curves:
+        if not _at_launch_state(curve) or _matches_launch_state(curve):
+            continue
+        off = [f"{field}={getattr(curve, field):,} (documented {value:,})"
+               for field, value in PUMPFUN_INITIAL.items()
+               if getattr(curve, field) != value]
+        out.append(f"untraded curve ({curve.raw_len} bytes) departs from the "
+                   f"launch state: " + "; ".join(off))
+    return out
 
 
 class RpcError(RuntimeError):

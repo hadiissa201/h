@@ -21,7 +21,7 @@ from collector.onchain import (
 )
 
 
-def account(virtual_tokens=1_073_000_191_000_000, virtual_sol=30_000_000_000,
+def account(virtual_tokens=1_073_000_000_000_000, virtual_sol=30_000_000_000,
             real_tokens=793_100_000_000_000, real_sol=5_000_000_000,
             supply=1_000_000_000_000_000, complete=0,
             discriminator=BONDING_CURVE_DISCRIMINATOR, tail=b"") -> str:
@@ -141,46 +141,72 @@ def test_no_curves_is_not_silently_a_pass():
     assert result and not any(c.passed for c in result)
 
 
-def test_a_constant_sol_seed_across_differing_curves_passes():
-    """The load-bearing check: real buys differ, the fictional seed does not."""
-    got = checks([
-        curve(virtual_sol=30_000_000_000, real_sol=0),
-        curve(virtual_sol=34_000_000_000, real_sol=4_000_000_000),
-        curve(virtual_sol=41_500_000_000, real_sol=11_500_000_000),
-    ])
-    assert got["virtual SOL seed is one constant"].passed
+def test_the_documented_launch_state_confirms_the_layout():
+    """What the live run actually produced: untraded curves holding pump.fun's
+    four documented launch values. Four simultaneous exact matches cannot come
+    from a misaligned read, so this is the strongest check available -- and it
+    needs no traded curve, which a stopped collector cannot supply."""
+    got = checks([curve(real_sol=0), curve(real_sol=0), curve(real_sol=0)])
+    check = got["fields reproduce the documented launch state"]
+    assert check.passed
+    assert "four documented" in check.detail
 
 
-def test_a_scattered_sol_seed_fails_because_that_is_a_wrong_offset():
-    got = checks([
-        curve(virtual_sol=30_000_000_000, real_sol=0),
-        curve(virtual_sol=34_000_000_000, real_sol=1_000_000_000),
-    ])
-    check = got["virtual SOL seed is one constant"]
-    assert not check.passed
-    assert "offset is wrong" in check.detail
+def test_two_matching_curves_are_not_enough():
+    got = checks([curve(real_sol=0), curve(real_sol=0)])
+    assert not got["fields reproduce the documented launch state"].passed
 
 
-def test_a_constant_that_contradicts_the_documented_seed_is_flagged_not_passed():
-    """One constant means the offset is probably right, but if it is not the
-    documented 30 SOL then something is unexplained, and an unexplained
-    constant must not be reported as a confirmation."""
-    got = checks([
-        curve(virtual_sol=99_000_000_000, real_sol=0),
-        curve(virtual_sol=99_500_000_000, real_sol=500_000_000),
-    ])
-    check = got["virtual SOL seed is one constant"]
-    assert not check.passed
-    assert "documents" in check.detail
+def test_a_misaligned_read_fails_because_it_cannot_hit_four_constants():
+    """The whole argument for this check: shift the fields and every one of
+    the four documented values is wrong at once."""
+    got = checks([curve(real_sol=0, virtual_sol=1_073_000_191_000_000,
+                        virtual_tokens=4_242_424_242),
+                  curve(real_sol=0, virtual_sol=1_073_000_191_000_000,
+                        virtual_tokens=4_242_424_242),
+                  curve(real_sol=0, virtual_sol=1_073_000_191_000_000,
+                        virtual_tokens=4_242_424_242)])
+    assert not got["fields reproduce the documented launch state"].passed
 
 
-def test_graduated_only_sample_cannot_test_the_seed_and_says_so():
-    """A graduated curve has been drained, so the invariant does not hold and
-    its absence is not evidence either way."""
-    got = checks([curve(complete=1), curve(complete=1)])
-    check = got["virtual SOL seed is one constant"]
-    assert not check.passed
-    assert "graduated" in check.detail
+def test_one_odd_curve_does_not_fail_a_layout_four_others_confirmed():
+    """The defect this replaced. The live run read four curves at exactly the
+    documented launch state and one with 0.43 SOL virtual, and the old check
+    reported the LAYOUT as wrong -- when four exact matches had just proved it
+    right. An outlier is a question about that token, not about the struct."""
+    odd = curve(real_sol=0, virtual_sol=426_629_411)
+    got = checks([curve(real_sol=0), curve(real_sol=0), curve(real_sol=0), odd])
+    assert got["fields reproduce the documented launch state"].passed
+
+
+def test_the_odd_curve_is_still_reported_as_an_anomaly():
+    """Confirming the parse must not bury the unexplained curve."""
+    from collector.onchain import anomalies
+    odd = curve(real_sol=0, virtual_sol=426_629_411)
+    found = anomalies([curve(real_sol=0), odd])
+    assert len(found) == 1
+    assert "virtual_sol_reserves=426,629,411" in found[0]
+
+
+def test_a_traded_curve_is_not_an_anomaly():
+    """Real buys raise virtual SOL above the seed. That is the curve working."""
+    from collector.onchain import anomalies
+    assert anomalies([curve(virtual_sol=34_000_000_000,
+                            real_sol=4_000_000_000)]) == []
+
+
+def test_no_traded_curve_is_reported_as_untested_not_as_a_pass_of_substance():
+    """Every curve read so far has held zero real SOL, so the field that caps
+    a real exit has never been seen non-zero. That must be said out loud."""
+    got = checks([curve(real_sol=0), curve(real_sol=0), curve(real_sol=0)])
+    check = got["traded curves keep the same virtual seed"]
+    assert check.passed
+    assert "UNTESTED" in check.detail
+
+
+def test_a_traded_curve_with_a_shifted_seed_does_fail():
+    got = checks([curve(virtual_sol=99_000_000_000, real_sol=4_000_000_000)])
+    assert not got["traded curves keep the same virtual seed"].passed
 
 
 def test_transposed_reserve_pairs_are_caught():
@@ -188,22 +214,7 @@ def test_transposed_reserve_pairs_are_caught():
     assert not got["virtual reserves exceed real"].passed
 
 
-def test_a_varying_total_supply_fails():
-    got = checks([curve(supply=1_000_000_000_000_000),
-                  curve(supply=7_777_000_000_000)])
-    assert not got["total supply is one constant"].passed
-
-
-def test_untouched_curves_cannot_prove_the_invariant():
-    """The trap the first live run fell into: three curves, every one at
-    real_sol == 0, so virtual - real is identical no matter where the fields
-    are read from. Identical-by-construction is not evidence."""
-    got = checks([curve(real_sol=0), curve(real_sol=0), curve(real_sol=0)])
-    check = got["virtual SOL seed is one constant"]
-    assert not check.passed
-    assert "DIFFERENT real SOL" in check.detail
-
-
-def test_one_curve_alone_cannot_prove_the_invariant():
-    got = checks([curve(real_sol=5_000_000_000)])
-    assert not got["virtual SOL seed is one constant"].passed
+def test_the_account_length_is_recorded_so_a_version_change_is_visible():
+    """The one anomalous curve may simply be a different curve version. Length
+    is where that shows up, and it was being thrown away."""
+    assert curve(real_sol=0).raw_len == 49

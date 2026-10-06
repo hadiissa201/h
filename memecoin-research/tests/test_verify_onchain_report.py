@@ -17,7 +17,7 @@ from verify_onchain import report
 
 
 def curve(virtual_sol=30_000_000_000, real_sol=0, complete=0,
-          virtual_tokens=1_073_000_191_000_000,
+          virtual_tokens=1_073_000_000_000_000,
           real_tokens=793_100_000_000_000,
           supply=1_000_000_000_000_000):
     raw = struct.pack("<8s5QB", BONDING_CURVE_DISCRIMINATOR, virtual_tokens,
@@ -32,36 +32,32 @@ def run(capsys, curves, agreed=(), disagreed=(), unreadable=(),
     return capsys.readouterr().out
 
 
-def test_the_actual_first_run_is_reported_as_unconfirmed(capsys):
-    """Three curves, no second source, all holding zero SOL -- the exact shape
-    of the run that came back from the user's machine. A single curve cannot
-    establish the invariant, so the layout is not confirmed."""
+def test_a_single_curve_is_not_enough_to_confirm_anything(capsys):
     out = run(capsys, [curve()], unreadable=[("a", "account does not exist")],
               empty=1)
     assert "LAYOUT NOT CONFIRMED" in out
 
 
-def test_three_differing_curves_do_confirm_the_layout(capsys):
-    out = run(capsys, [curve(real_sol=0),
-                       curve(virtual_sol=34_000_000_000, real_sol=4_000_000_000),
-                       curve(virtual_sol=47_000_000_000, real_sol=17_000_000_000)],
-              funded=2, empty=1)
+def test_the_live_run_sample_now_confirms_the_layout(capsys):
+    """The exact shape the user's machine returned: four untraded curves at
+    pump.fun's documented launch state plus one that departs from it. The
+    layout is confirmed and the odd curve is raised separately."""
+    out = run(capsys, [curve(real_sol=0)] * 4
+              + [curve(real_sol=0, virtual_sol=426_629_411)],
+              funded=0, empty=5)
     assert "LAYOUT CONFIRMED" in out
-    assert "no second source" in out
+    assert "ANOMALIES" in out
+    assert "426,629,411" in out
 
 
 def test_an_empty_curve_is_never_counted_as_tradable_coverage(capsys):
-    out = run(capsys, [curve(real_sol=0),
-                       curve(virtual_sol=34_000_000_000, real_sol=4_000_000_000),
-                       curve(virtual_sol=47_000_000_000, real_sol=17_000_000_000)],
-              funded=1, empty=9)
-    assert "Of the 10 tokens only the chain sees, 1" in out
+    out = run(capsys, [curve(real_sol=0)] * 3, funded=1, empty=9)
+    assert "only the chain sees, 1 hold more than" in out
     assert "unsellable" in out
 
 
 def test_missing_dexscreener_overlap_is_not_a_pass_and_not_a_failure(capsys):
-    out = run(capsys, [curve(real_sol=0),
-                       curve(virtual_sol=34_000_000_000, real_sol=4_000_000_000)])
+    out = run(capsys, [curve(real_sol=0)] * 3)
     assert "Unavailable" in out
     assert "not a pass either" in out
 
@@ -71,18 +67,26 @@ def test_disagreeing_sources_block_the_verdict_even_when_invariants_hold(capsys)
     old code printed CONFIRMED from the invariants and MISMATCH from
     DexScreener in the same output."""
     rows = [("mint", 1e-7, 9e-7, 9.0, 0.0, False)]
-    out = run(capsys, [curve(real_sol=0),
-                       curve(virtual_sol=34_000_000_000, real_sol=4_000_000_000)],
-              disagreed=rows)
+    out = run(capsys, [curve(real_sol=0)] * 3, disagreed=rows)
     assert "LAYOUT NOT CONFIRMED" in out
     assert out.count("LAYOUT CONFIRMED") == 0
 
 
-def test_a_wrong_offset_shows_up_as_a_scattered_seed(capsys):
-    out = run(capsys, [curve(virtual_sol=30_000_000_000, real_sol=0),
-                       curve(virtual_sol=34_000_000_000, real_sol=1_000_000_000)])
+def test_a_misaligned_read_is_still_rejected(capsys):
+    """The confirmation must not be a rubber stamp: shift the fields and all
+    four documented values break at once."""
+    out = run(capsys, [curve(real_sol=0, virtual_sol=7, virtual_tokens=9)] * 4)
     assert "LAYOUT NOT CONFIRMED" in out
-    assert "offset is wrong" in out
+
+
+def test_a_graduated_token_is_reported_as_left_the_curve_not_as_unreadable(capsys):
+    """A zeroed curve means the token survived to an AMM. Counting it as
+    unreadable threw away the most interesting group in the sample."""
+    from verify_onchain import report
+    report([curve(real_sol=0)] * 3, [], [], [], 0, 0, 11)
+    out = capsys.readouterr().out
+    assert "LEFT the curve" in out
+    assert "11" in out
 
 
 def test_reading_nothing_at_all_is_not_confirmation(capsys):
