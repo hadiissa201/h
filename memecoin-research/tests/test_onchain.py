@@ -204,9 +204,41 @@ def test_no_traded_curve_is_reported_as_untested_not_as_a_pass_of_substance():
     assert "UNTESTED" in check.detail
 
 
-def test_a_traded_curve_with_a_shifted_seed_does_fail():
-    got = checks([curve(virtual_sol=99_000_000_000, real_sol=4_000_000_000)])
+def test_two_traded_curves_with_a_shifted_seed_do_fail():
+    got = checks([curve(virtual_sol=99_000_000_000, real_sol=4_000_000_000),
+                  curve(virtual_sol=97_000_000_000, real_sol=1_000_000_000)])
     assert not got["traded curves keep the same virtual seed"].passed
+
+
+def test_two_traded_curves_with_a_steady_seed_do_pass():
+    got = checks([curve(virtual_sol=34_000_000_000, real_sol=4_000_000_000),
+                  curve(virtual_sol=31_000_000_000, real_sol=1_000_000_000)])
+    check = got["traded curves keep the same virtual seed"]
+    assert check.passed
+    assert "2 different real" in check.detail
+
+
+def test_one_dust_curve_does_not_pass_as_a_traded_curve():
+    """The live run's defect. A curve holding a few thousand lamports made the
+    strongest check report PASS on "1 traded curves", in a report whose verdict
+    said no curve had ever been seen holding anything."""
+    got = checks([curve(real_sol=4_000)] + [curve(real_sol=0)] * 3)
+    check = got["traded curves keep the same virtual seed"]
+    assert "UNTESTED" in check.detail
+
+
+def test_identical_real_sol_cannot_settle_the_seed_either():
+    """Two curves holding the same amount agree by construction."""
+    got = checks([curve(virtual_sol=34_000_000_000, real_sol=4_000_000_000)] * 2)
+    assert "UNTESTED" in got["traded curves keep the same virtual seed"].detail
+
+
+def test_traded_curves_is_the_single_source_both_callers_use():
+    """The contradiction came from two places deciding this independently."""
+    from collector.onchain import traded_curves
+    sample = [curve(real_sol=4_000), curve(real_sol=0),
+              curve(real_sol=5_000_000_000)]
+    assert len(traded_curves(sample)) == 1
 
 
 def test_transposed_reserve_pairs_are_caught():

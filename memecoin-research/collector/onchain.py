@@ -129,6 +129,23 @@ class LayoutCheck:
     detail: str
 
 
+# Two curves at least, so "they agree" means something, and each holding more
+# than dust, so a few thousand stray lamports cannot pass as a trade.
+MIN_TRADED_CURVES = 2
+
+
+def traded_curves(curves: list[BondingCurve]) -> list[BondingCurve]:
+    """Curves with real SOL in them, dust excluded.
+
+    One source of truth on purpose. The seed check and the verdict each
+    decided this for themselves and printed contradictory claims in the same
+    report: the check passed on "1 traded curves" while the verdict said no
+    curve had ever been seen holding anything.
+    """
+    return [c for c in curves
+            if not c.complete and c.extractable_sol() >= MIN_SELLABLE_SOL]
+
+
 def _at_launch_state(curve: BondingCurve) -> bool:
     """A curve nobody has traded: no real SOL in it, not graduated."""
     return curve.real_sol_reserves == 0 and not curve.complete
@@ -176,28 +193,32 @@ def layout_evidence(curves: list[BondingCurve]) -> list[LayoutCheck]:
             f"documented launch state ({expected}); {MIN_INITIAL_CURVES} are "
             f"needed before a coincidence stops being the explanation"))
 
-    traded = [c for c in curves if not c.complete and c.real_sol_reserves > 0]
+    traded = traded_curves(curves)
     seeds = {c.virtual_sol_reserves - c.real_sol_reserves for c in traded}
-    if len(seeds) >= 2 or (traded and seeds != {PUMPFUN_INITIAL["virtual_sol_reserves"]}):
+    reals = {c.real_sol_reserves for c in traded}
+    if len(traded) < MIN_TRADED_CURVES or len(reals) < 2:
+        # Not a failure, and not a pass either. The strongest check has no
+        # data, and saying so is different from saying the layout is wrong.
+        # It used to pass on one curve holding a few thousand lamports, which
+        # is neither a trade nor an agreement between curves.
+        checks.append(LayoutCheck(
+            "traded curves keep the same virtual seed", True,
+            f"UNTESTED: only {len(traded)} curve(s) read held more than "
+            f"{MIN_SELLABLE_SOL} SOL, so the field that caps a real exit has "
+            f"never been observed carrying anything. Its position is pinned "
+            f"by the launch state above, but {MIN_TRADED_CURVES} curves with "
+            f"DIFFERENT real SOL are what would settle it"))
+    elif seeds != {PUMPFUN_INITIAL["virtual_sol_reserves"]}:
         shown = ", ".join(f"{v / 10 ** WSOL_DECIMALS:,.9g}" for v in sorted(seeds))
         checks.append(LayoutCheck(
             "traded curves keep the same virtual seed", False,
             f"across {len(traded)} traded curves the virtual SOL seed came "
             f"out as {shown} SOL, and real buys should leave it at 30"))
-    elif traded:
-        checks.append(LayoutCheck(
-            "traded curves keep the same virtual seed", True,
-            f"{len(traded)} traded curves all keep a 30 SOL virtual seed on "
-            f"top of differing real SOL"))
     else:
-        # Not a failure. The strongest check simply has no data yet, and
-        # saying so is different from saying the layout is wrong.
         checks.append(LayoutCheck(
             "traded curves keep the same virtual seed", True,
-            "UNTESTED: no curve read had any real SOL in it, so the field "
-            "that caps a real exit has only ever been observed as zero. Its "
-            "position is confirmed by the launch state above, but a non-zero "
-            "reading is still worth getting"))
+            f"{len(traded)} traded curves holding {len(reals)} different real "
+            f"SOL amounts all keep a 30 SOL virtual seed"))
 
     bad = [c for c in curves
            if c.virtual_sol_reserves < c.real_sol_reserves

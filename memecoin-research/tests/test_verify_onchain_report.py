@@ -170,3 +170,21 @@ def test_a_recent_window_excludes_the_old_whale(capsys):
         picked = [t.address for t in pick_tokens(s, limit=6, hours=48)]
     assert "whale" not in picked
     assert all(p.startswith("never-priced") for p in picked)
+
+
+def test_graduated_curves_count_toward_the_sample_denominator(capsys):
+    """The run printed "5 of 29" after looking at 40 tokens, because the 11
+    curves it read and classified as graduated were dropped from the total."""
+    from verify_onchain import report
+    report([curve(real_sol=0)] * 5, [], [], [("a", "no account")] * 24,
+           0, 5, 11)
+    out = capsys.readouterr().out
+    assert "5 of 40" in out
+
+
+def test_the_verdict_and_the_seed_check_never_disagree(capsys):
+    """Both now read the same predicate. One dust curve must not be a traded
+    curve in one section and absent in the other."""
+    out = run(capsys, [curve(real_sol=4_000)] + [curve(real_sol=0)] * 3)
+    assert "UNTESTED" in out
+    assert "only 0 of the" in out

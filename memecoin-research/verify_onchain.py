@@ -34,6 +34,7 @@ from collector.onchain import (
     MIN_SELLABLE_SOL,
     WSOL_DECIMALS,
     anomalies,
+    traded_curves,
     _redact,
     curve_address,
     find_bonding_curve,
@@ -109,7 +110,10 @@ def report(curves, agreed, disagreed, unreadable,
     print("=" * 70)
     chain_only = chain_only_funded + chain_only_empty
     readable = total + chain_only
-    sampled = readable + len(unreadable)
+    # The graduated curves were read successfully, so leaving them out of the
+    # denominator understated the sample and made the ratio flattering: it
+    # printed "5 of 29" for a run that had looked at 40 tokens.
+    sampled = readable + migrated + len(unreadable)
     print(f"  readable on chain              {readable:>4} of {sampled}")
     print(f"  of which DexScreener had too   {total:>4}")
     print(f"  CHAIN ONLY, over {MIN_SELLABLE_SOL} SOL     {chain_only_funded:>4}  "
@@ -147,10 +151,16 @@ def report(curves, agreed, disagreed, unreadable,
         if not total:
             print("  with no second source.")
         print("\n  Two things that does NOT establish.")
+        # Derived from the same predicate the seed check uses. These two
+        # sections used to decide it separately and printed a passing check
+        # about "1 traded curves" above a verdict saying none existed.
+        with_sol = traded_curves(curves)
         print("\n  One: that real_sol_reserves reads correctly in anger. Its")
-        print("  position is pinned by the launch state, but every curve read")
-        print("  so far held zero, so the field that caps a real exit has")
-        print("  never been observed non-zero. One traded curve settles it.")
+        print("  position is pinned by the launch state, but only "
+              f"{len(with_sol)} of the")
+        print(f"  {len(curves)} curves read held more than {MIN_SELLABLE_SOL} "
+              f"SOL, so the field that caps")
+        print("  a real exit has barely been observed carrying anything.")
         print("\n  Two: that the coverage gain is tradable. A curve we can")
         print(f"  read is not a curve we could sell into. Of the {chain_only} tokens")
         print(f"  only the chain sees, {chain_only_funded} hold more than "
