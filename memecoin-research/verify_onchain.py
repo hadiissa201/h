@@ -24,7 +24,7 @@ from collections import Counter
 from datetime import UTC, datetime, timedelta
 
 import httpx
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from collector.config import load_settings
@@ -110,9 +110,10 @@ def report(curves, agreed, disagreed, unreadable,
         print(f"\n  {len(unreadable)} could not be read on chain either:")
         for reason, n in Counter(r for _, r in unreadable).most_common(4):
             print(f"    {n:>4}  {reason[:200]}")
-        print("\n  'account does not exist' at the derived address means the")
-        print("  token is not a pump.fun launch -- a Raydium pool, or another")
-        print("  launchpad. Those need a different reader, not this one.")
+        if any("does not exist" in r for _, r in unreadable):
+            print("\n  'account does not exist' at the derived address means")
+            print("  the token is not a pump.fun launch -- a Raydium pool, or")
+            print("  another launchpad. Those need a different reader.")
 
     print("\n" + "=" * 70)
     print("VERDICT")
@@ -134,6 +135,45 @@ def report(curves, agreed, disagreed, unreadable,
         print("  unsellable, so they cannot rescue a return -- they can only")
         print("  make the loss rate honest, which is still worth having.")
     return 0
+
+
+def pick_tokens(session, limit: int, hours: float | None) -> list:
+    """Choose which tokens to read, in two halves and for two reasons.
+
+    Ordered by the most liquidity we ever recorded, not by how recently the
+    token was detected. Recency was the wrong key twice over: the collector is
+    stopped, so "recent" means days old, and a token detected recently is most
+    often one nobody bought. Peak liquidity selects for curves that took real
+    SOL, and an abandoned curve keeps whatever its holders never sold -- which
+    is the differing real_sol the seed invariant needs and has never had.
+
+    The second half is tokens DexScreener never priced. Those answer the
+    coverage question and must stay unfiltered, since they are the population
+    the whole exercise is about.
+    """
+    window = []
+    if hours:
+        window.append(Token.detected_ts
+                      >= datetime.now(UTC) - timedelta(hours=hours))
+
+    half = max(1, limit // 2)
+    peak = (select(Observation.token_id.label("token_id"),
+                   func.max(Observation.liquidity_usd).label("peak"))
+            .where(Observation.liquidity_usd.is_not(None))
+            .group_by(Observation.token_id).subquery())
+    traded = session.scalars(
+        select(Token).join(peak, peak.c.token_id == Token.id)
+        .where(*window).order_by(peak.c.peak.desc()).limit(half)).all()
+
+    priced_ids = select(Observation.token_id).where(
+        Observation.price_usd.is_not(None)).distinct().scalar_subquery()
+    unpriced = session.scalars(
+        select(Token).where(*window, Token.id.not_in(priced_ids))
+        .order_by(Token.detected_ts.desc())
+        .limit(limit - len(traded))).all()
+    print(f"sampling {len(traded)} tokens by peak recorded liquidity and "
+          f"{len(unpriced)} DexScreener never priced\n")
+    return list(traded) + list(unpriced)
 
 
 def check_mints(mints: list[str], rpc_url: str) -> int:
@@ -179,7 +219,10 @@ def check_mints(mints: list[str], rpc_url: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--limit", type=int, default=40)
-    parser.add_argument("--hours", type=float, default=48.0)
+    parser.add_argument("--hours", type=float, default=None,
+                        help="only consider tokens detected in the last N hours. "
+                             "Default is all of history, because a recent "
+                             "window of a stopped collector holds nothing")
     parser.add_argument("--rpc", default=None,
                         help="override the RPC endpoint. Use "
                              "https://api.mainnet-beta.solana.com when the "
@@ -217,29 +260,7 @@ def main() -> int:
         else:
             print(f"SOL = ${sol_usd:,.2f}\n")
 
-        cutoff = datetime.now(UTC) - timedelta(hours=args.hours)
-
-        # Sample deliberately, in two halves. The first run took the 15 most
-        # recent tokens and got 10 non-pump.fun launches plus 3 curves nobody
-        # had ever bought -- useless for both questions. Tokens the aggregator
-        # priced are tokens somebody traded, which is what the seed invariant
-        # needs and the only place a DexScreener cross-check can happen.
-        # Tokens it never priced are the ones that measure the coverage gain.
-        half = max(1, args.limit // 2)
-        priced_ids = select(Observation.token_id).where(
-            Observation.price_usd.is_not(None)).distinct().scalar_subquery()
-        traded = session.scalars(
-            select(Token).where(Token.detected_ts >= cutoff,
-                                Token.id.in_(priced_ids))
-            .order_by(Token.detected_ts.desc()).limit(half)).all()
-        unpriced = session.scalars(
-            select(Token).where(Token.detected_ts >= cutoff,
-                                Token.id.not_in(priced_ids))
-            .order_by(Token.detected_ts.desc())
-            .limit(args.limit - len(traded))).all()
-        tokens = list(traded) + list(unpriced)
-        print(f"sampling {len(traded)} tokens DexScreener priced and "
-              f"{len(unpriced)} it never did\n")
+        tokens = pick_tokens(session, args.limit, args.hours)
 
         pacer = Pacer()
         agreed, disagreed, unreadable = [], [], []

@@ -110,3 +110,59 @@ def test_empty_mints_argument_exits_nonzero(monkeypatch, capsys):
                         ["verify_onchain.py", "--mints", " , ",
                          "--rpc", "http://127.0.0.1:1"])
     assert verify_onchain.main() == 1
+
+
+# ------------------------------------------------------------ which tokens
+def seeded_session():
+    from datetime import UTC, datetime, timedelta
+
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import Session
+
+    from collector.models import Base, Observation, Token
+
+    engine = create_engine("sqlite://", future=True)
+    Base.metadata.create_all(engine)
+    s = Session(engine)
+    now = datetime.now(UTC)
+    # Oldest token took the most liquidity; newest was never priced at all.
+    rows = [("whale", 14, 90_000.0), ("mid", 9, 4_000.0), ("small", 5, 80.0)]
+    for name, days, liq in rows:
+        t = Token(address=name, chain="solana", detection_source="test",
+                  detected_ts=now - timedelta(days=days))
+        s.add(t)
+        s.flush()
+        s.add(Observation(token_id=t.id, observed_ts=now - timedelta(days=days),
+                          source="dexscreener", price_usd=1e-7,
+                          liquidity_usd=liq))
+    for i in range(3):
+        s.add(Token(address=f"never-priced-{i}", chain="solana", detection_source="test",
+                    detected_ts=now - timedelta(hours=i + 1)))
+    s.commit()
+    return s
+
+
+def test_the_traded_half_is_ordered_by_peak_liquidity_not_recency(capsys):
+    """Recency picked tokens nobody bought, three runs in a row. The curve
+    that took the most SOL is the one most likely to still hold some."""
+    from verify_onchain import pick_tokens
+    with seeded_session() as s:
+        picked = [t.address for t in pick_tokens(s, limit=4, hours=None)]
+    assert picked[:2] == ["whale", "mid"]
+
+
+def test_never_priced_tokens_fill_the_second_half(capsys):
+    from verify_onchain import pick_tokens
+    with seeded_session() as s:
+        picked = [t.address for t in pick_tokens(s, limit=6, hours=None)]
+    assert sum(p.startswith("never-priced") for p in picked) == 3
+
+
+def test_a_recent_window_excludes_the_old_whale(capsys):
+    """Proof the default of all-history matters: a 48h window, which is what
+    the script used to default to, cannot see any token that ever traded."""
+    from verify_onchain import pick_tokens
+    with seeded_session() as s:
+        picked = [t.address for t in pick_tokens(s, limit=6, hours=48)]
+    assert "whale" not in picked
+    assert all(p.startswith("never-priced") for p in picked)
