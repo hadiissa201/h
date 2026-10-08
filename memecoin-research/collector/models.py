@@ -330,6 +330,40 @@ class TokenStatus(Base):
     consecutive_dead_checks: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class CurveState(Base):
+    """What the chain says about a token's pump.fun bonding curve.
+
+    The pool table cannot label graduation. It is censored in both directions:
+    88 tokens have a pumpswap pool with no pump.fun pool recorded, so we
+    missed their curve phase entirely, and any token that migrated after the
+    collector stopped watching it looks like it never did. That produced a
+    1.14% graduation rate on a population where the true figure is clearly
+    higher, and a base rate that wrong makes every signal test meaningless.
+
+    The curve's own `complete` flag is definitive and uncensored: one
+    getAccountInfo call, available for any token at any time, regardless of
+    what we happened to be watching when.
+    """
+
+    __tablename__ = "curve_states"
+
+    id: Mapped[int] = mapped_column(PK, primary_key=True, autoincrement=True)
+    token_id: Mapped[int] = mapped_column(FK_TYPE, ForeignKey("tokens.id"),
+                                          unique=True, index=True)
+    curve_address: Mapped[str | None] = mapped_column(String(128))
+    # False means no account at the derived address: not a pump.fun launch.
+    account_exists: Mapped[bool] = mapped_column(Boolean, index=True)
+    # None when the account does not exist or could not be parsed. Stored
+    # separately from the reserves so the assumption that migration sets this
+    # flag can be CHECKED against zeroed reserves rather than trusted.
+    complete: Mapped[bool | None] = mapped_column(Boolean, index=True)
+    virtual_sol_reserves: Mapped[int | None] = mapped_column(BigInteger)
+    real_sol_reserves: Mapped[int | None] = mapped_column(BigInteger)
+    account_bytes: Mapped[int | None] = mapped_column(Integer)
+    checked_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    note: Mapped[str | None] = mapped_column(String(256))
+
+
 class WorkItem(Base):
     """The scheduler's queue, in Postgres rather than memory.
 

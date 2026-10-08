@@ -33,7 +33,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from collector.config import load_settings
-from collector.models import Observation, Pool, Token
+from collector.models import CurveState, Observation, Pool, Token
 from collector.verify import wilson_interval
 
 # Below this there is no test to run. A handful of graduates cannot support a
@@ -50,6 +50,24 @@ EARLY_FEATURES = (
     ("volume_5m", "5m volume"),
     ("buys_5m", "5m buys"),
 )
+
+
+def chain_labels(session: Session) -> tuple[set[int], set[int], int]:
+    """(graduated, eligible, labelled) from the curve's own complete flag.
+
+    Preferred over the pool table whenever it exists, because it is not
+    censored by what the collector happened to be watching. Returns an empty
+    eligible set when label_graduation.py has not been run.
+    """
+    graduated, eligible = set(), set()
+    rows = session.scalars(select(CurveState)).all()
+    for row in rows:
+        if not row.account_exists:
+            continue
+        eligible.add(row.token_id)
+        if row.complete:
+            graduated.add(row.token_id)
+    return graduated, eligible, len(rows)
 
 
 def graduation_markers(session: Session) -> tuple[set[int], set[int], Counter]:
@@ -194,32 +212,57 @@ def main() -> int:
     engine = create_engine(settings.database_url, future=True)
     with Session(engine) as session:
         all_tokens = session.scalars(select(Token)).all()
+        chain_grad, chain_elig, labelled = chain_labels(session)
         graduated, eligible, dex_counts = graduation_markers(session)
-        tokens = [t for t in all_tokens if t.id in eligible]
 
         print("=" * 70)
         print("HOW GRADUATION IS LABELLED")
         print("=" * 70)
-        print("  Graduation is a transition within ONE token: it launched on")
-        print("  the pump.fun curve and later appeared on another venue.")
-        print("  pumpswap is pump.fun's own AMM, so arriving there IS leaving")
-        print("  the curve. Meteora DBC and Bags are separate launchpads, so")
-        print("  their tokens were never on a pump.fun curve to graduate off.")
-        print("\n  The dex column, so the label can be checked:")
+        from_chain = bool(chain_elig)
+        if from_chain:
+            graduated, eligible = chain_grad, chain_elig
+            print(f"  FROM THE CHAIN. {labelled} tokens have had their bonding")
+            print("  curve read directly, and the curve's own complete flag")
+            print("  says whether it graduated. That is not censored by what")
+            print("  the collector happened to be watching.")
+            if labelled < len(all_tokens):
+                print(f"\n  INCOMPLETE: {len(all_tokens) - labelled} of "
+                      f"{len(all_tokens)} tokens are not labelled")
+                print("  yet, so every figure below covers the labelled subset")
+                print("  only. Finish the pass before reading the base rate as")
+                print("  the truth:")
+                print("    python label_graduation.py --rpc "
+                      "https://api.mainnet-beta.solana.com")
+        else:
+            print("  FROM THE POOL TABLE, WHICH IS CENSORED. Tokens whose curve")
+            print("  phase we missed and tokens that migrated after we stopped")
+            print("  watching are both invisible to it, so the rate below is a")
+            print("  floor, not an estimate. Fix it with:")
+            print("    python label_graduation.py --rpc "
+                  "https://api.mainnet-beta.solana.com")
+            print("\n  Meanwhile: graduation is a transition within ONE token,")
+            print("  launched on the pump.fun curve and later on another venue.")
+            print("  pumpswap is pump.fun's own AMM, so arriving there IS")
+            print("  leaving the curve. Meteora DBC and Bags are separate")
+            print("  launchpads, never on a pump.fun curve to graduate off.")
+
+        print("\n  The dex column, for reference:")
         for label, count in dex_counts.most_common(10):
             role = "the curve" if _is_pumpfun_curve(label) else "off-curve venue"
             print(f"    {count:>6}  {label:<14} {role}")
         if not dex_counts:
-            print("    no pools recorded at all -- nothing can be labelled")
+            print("    no pools recorded at all")
 
+        tokens = [t for t in all_tokens if t.id in eligible]
         n = len(tokens)
         hits = sum(1 for t in tokens if t.id in graduated)
         print("\n" + "=" * 70)
         print("BASE RATE")
         print("=" * 70)
         print(f"  {len(all_tokens)} tokens collected")
-        print(f"  {n} ever had a pump.fun curve pool, so only these could graduate")
-        print(f"  {len(all_tokens) - n} are foreign launchpads or have no pool, and are excluded")
+        print(f"  {n} are pump.fun launches, so only these could graduate")
+        print(f"  {len(all_tokens) - n} are not, or are not labelled yet, "
+              f"and are excluded")
         if not n:
             print("\n  Nothing eligible. No test to run.")
             return 0
