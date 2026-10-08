@@ -19,6 +19,7 @@ from collector.models import Base, Observation, Pool, Token
 from graduated import (
     early_features,
     graduation_markers,
+    missingness_confound,
     separates,
     tercile_rates,
 )
@@ -27,17 +28,18 @@ NOW = datetime(2026, 1, 1, tzinfo=UTC)
 
 
 def session_with(tokens):
-    """tokens: list of (address, dex_or_None, [(offset_s, liquidity)])."""
+    """tokens: list of (address, dexes_or_None, [(offset_s, liquidity)])."""
     engine = create_engine("sqlite://", future=True)
     Base.metadata.create_all(engine)
     s = Session(engine)
-    for address, dex, rows in tokens:
+    for address, dexes, rows in tokens:
         token = Token(address=address, chain="solana",
                       detection_source="test", detected_ts=NOW)
         s.add(token)
         s.flush()
-        if dex is not None:
-            s.add(Pool(token_id=token.id, pair_address=f"p-{address}", dex=dex))
+        for i, dex in enumerate(dexes or []):
+            s.add(Pool(token_id=token.id, pair_address=f"p-{address}-{i}",
+                       dex=dex))
         for offset, liquidity in rows:
             s.add(Observation(token_id=token.id,
                               observed_ts=NOW + timedelta(seconds=offset),
@@ -48,24 +50,55 @@ def session_with(tokens):
 
 
 # ------------------------------------------------------------ the label
-def test_a_raydium_pool_marks_graduation_and_a_pumpfun_pool_does_not():
-    with session_with([("grad", "raydium", []),
-                       ("still-on-curve", "pumpfun", []),
-                       ("no-pool", None, [])]) as s:
-        graduated, counts = graduation_markers(s)
-        addresses = {t.address for t in s.query(Token).all()
-                     if t.id in graduated}
-    assert addresses == {"grad"}
-    assert counts["raydium"] == 1
-    assert counts["pumpfun"] == 1
+def test_graduation_is_a_transition_off_the_curve_not_a_dex_name():
+    """The bug this replaced. Matching on "pump" threw away pumpswap, which is
+    where a graduating pump.fun token GOES, and counted Meteora DBC and Bags
+    tokens as graduated when those are separate launchpads that were never on
+    a pump.fun curve."""
+    with session_with([
+        ("graduated-to-pumpswap", ["pumpfun", "pumpswap"], []),
+        ("graduated-to-raydium", ["pumpfun", "raydium"], []),
+        ("still-on-curve", ["pumpfun"], []),
+        ("foreign-launchpad", ["meteoradbc"], []),
+        ("foreign-bags", ["bags"], []),
+    ]) as s:
+        graduated, eligible, counts = graduation_markers(s)
+        by_id = {t.id: t.address for t in s.query(Token).all()}
+        grad = {by_id[i] for i in graduated}
+        elig = {by_id[i] for i in eligible}
+    assert grad == {"graduated-to-pumpswap", "graduated-to-raydium"}
+    assert elig == grad | {"still-on-curve"}
+    assert counts["pumpswap"] == 1
 
 
-def test_the_dex_values_are_returned_so_the_label_can_be_checked():
-    """Every wrong conclusion here came from a number printed without its
-    provenance. The caller must be able to see what it labelled and why."""
-    with session_with([("a", "raydium clmm", []), ("b", "meteora", [])]) as s:
-        _, counts = graduation_markers(s)
-    assert set(counts) == {"raydium clmm", "meteora"}
+def test_a_foreign_launchpad_token_is_not_even_eligible():
+    """It cannot graduate off a curve it was never on, so including it would
+    dilute the base rate the signal has to beat."""
+    with session_with([("meteora-only", ["meteora"], [])]) as s:
+        graduated, eligible, _ = graduation_markers(s)
+    assert not graduated and not eligible
+
+
+def test_arriving_at_pumpswap_is_not_mistaken_for_never_leaving():
+    with session_with([("grad", ["pumpfun", "pumpswap"], [])]) as s:
+        graduated, _, _ = graduation_markers(s)
+    assert len(graduated) == 1
+
+
+# -------------------------------------------------- missingness is not signal
+def test_a_field_whose_presence_predicts_the_outcome_is_flagged():
+    """The live numbers: 114 of 162 tokens with early liquidity graduated,
+    against 156 of 1764 overall. 70% versus 9% means the field's existence is
+    the signal, so terciles of its value measure our own coverage."""
+    assert missingness_confound(114, 162, 156, 1764)
+
+
+def test_a_representative_subsample_is_not_flagged():
+    assert not missingness_confound(45, 500, 156, 1764)
+
+
+def test_an_empty_subsample_is_not_flagged_as_confounded():
+    assert not missingness_confound(0, 0, 156, 1764)
 
 
 # ------------------------------------------------- no hindsight in a feature

@@ -52,21 +52,66 @@ EARLY_FEATURES = (
 )
 
 
-def graduation_markers(session: Session) -> tuple[set[int], Counter]:
-    """Token ids that reached a non-pump.fun pool, plus what the dex column said.
+def graduation_markers(session: Session) -> tuple[set[int], set[int], Counter]:
+    """Tokens that LEFT the pump.fun curve, the ones eligible to, and the dexes.
 
-    The counter is returned so the labelling can be checked rather than
-    trusted. Every wrong conclusion in this project so far came from a number
-    whose provenance was not printed next to it.
+    Returns (graduated, eligible, dex_counts).
+
+    Graduation is a transition WITHIN one token: it launched on the pump.fun
+    curve and later appeared on another venue. The first version asked instead
+    whether a pool's dex name contained "pump", and got the answer exactly
+    backwards in both directions. It discarded pumpswap -- pump.fun's own AMM,
+    which is where a graduating token goes -- and it counted Meteora DBC and
+    Bags tokens as graduated pump.fun coins when those are separate
+    LAUNCHPADS that were never on a pump.fun curve at all.
+
+    That mistake manufactured a signal. 156 "graduates" were mostly foreign
+    launchpads, so the market-cap separation it found was a launchpad detector
+    dressed as a graduation predictor.
     """
-    graduated: set[int] = set()
+    pools_by_token: dict[int, set[str]] = defaultdict(set)
     seen: Counter = Counter()
     for pool in session.scalars(select(Pool)).all():
         label = (pool.dex or "unknown").lower()
         seen[label] += 1
-        if "pump" not in label:
-            graduated.add(pool.token_id)
-    return graduated, seen
+        pools_by_token[pool.token_id].add(label)
+
+    eligible, graduated = set(), set()
+    for token_id, dexes in pools_by_token.items():
+        if not any(_is_pumpfun_curve(d) for d in dexes):
+            # Never on the curve, so it cannot graduate off one.
+            continue
+        eligible.add(token_id)
+        if any(not _is_pumpfun_curve(d) for d in dexes):
+            graduated.add(token_id)
+    return graduated, eligible, seen
+
+
+def _is_pumpfun_curve(dex: str) -> bool:
+    """The launch venue itself, not pump.fun's AMM.
+
+    pumpswap is the destination, so matching on "pump" alone would treat
+    arriving as never having left.
+    """
+    return "pumpfun" in dex or dex in {"pump.fun", "pump"}
+
+
+def missingness_confound(subsample_hits: int, subsample_n: int,
+                         base_hits: int, base_n: int) -> bool:
+    """True when HAVING the feature predicts the outcome better than its value.
+
+    The run that prompted this: only 162 of 1,764 tokens had liquidity
+    recorded within 300s, and 70.4% of those graduated against an 8.8% base
+    rate. Whether the field exists is an eight-fold stronger signal than any
+    value it takes, so terciles of that field measure our own coverage. The
+    tell was the direction -- LESS early liquidity appeared to predict MORE
+    graduation, which no market story explains.
+    """
+    if not subsample_n or not base_n:
+        return False
+    sub_low, sub_high = wilson_interval(subsample_hits, subsample_n)
+    base_low, base_high = wilson_interval(base_hits, base_n)
+    return sub_high < base_low or base_high < sub_low
 
 
 def early_features(session: Session, token: Token,
@@ -148,33 +193,41 @@ def main() -> int:
     settings = load_settings()
     engine = create_engine(settings.database_url, future=True)
     with Session(engine) as session:
-        tokens = session.scalars(select(Token)).all()
-        graduated, dex_counts = graduation_markers(session)
+        all_tokens = session.scalars(select(Token)).all()
+        graduated, eligible, dex_counts = graduation_markers(session)
+        tokens = [t for t in all_tokens if t.id in eligible]
 
         print("=" * 70)
         print("HOW GRADUATION IS LABELLED")
         print("=" * 70)
-        print("  A token counts as graduated if it has a pool on a dex that is")
-        print("  not pump.fun, which is what migration off the curve creates.")
-        print("  The dex column, so the label can be checked:")
-        for label, count in dex_counts.most_common(8):
-            mark = "  graduated" if "pump" not in label else ""
-            print(f"    {count:>6}  {label}{mark}")
+        print("  Graduation is a transition within ONE token: it launched on")
+        print("  the pump.fun curve and later appeared on another venue.")
+        print("  pumpswap is pump.fun's own AMM, so arriving there IS leaving")
+        print("  the curve. Meteora DBC and Bags are separate launchpads, so")
+        print("  their tokens were never on a pump.fun curve to graduate off.")
+        print("\n  The dex column, so the label can be checked:")
+        for label, count in dex_counts.most_common(10):
+            role = "the curve" if _is_pumpfun_curve(label) else "off-curve venue"
+            print(f"    {count:>6}  {label:<14} {role}")
         if not dex_counts:
             print("    no pools recorded at all -- nothing can be labelled")
 
         n = len(tokens)
         hits = sum(1 for t in tokens if t.id in graduated)
-        low, high = wilson_interval(hits, n) if n else (0.0, 0.0)
         print("\n" + "=" * 70)
         print("BASE RATE")
         print("=" * 70)
-        print(f"  {hits} of {n} tokens graduated "
-              f"({hits / n * 100:.2f}%)" if n else "  no tokens")
-        if n:
-            print(f"  95% interval {low * 100:.2f}% to {high * 100:.2f}%")
-            print("\n  This is the number any entry signal has to beat. A rule")
-            print("  that picks graduates at the base rate has found nothing.")
+        print(f"  {len(all_tokens)} tokens collected")
+        print(f"  {n} ever had a pump.fun curve pool, so only these could graduate")
+        print(f"  {len(all_tokens) - n} are foreign launchpads or have no pool, and are excluded")
+        if not n:
+            print("\n  Nothing eligible. No test to run.")
+            return 0
+        low, high = wilson_interval(hits, n)
+        print(f"\n  {hits} of {n} eligible tokens graduated ({hits / n * 100:.2f}%)")
+        print(f"  95% interval {low * 100:.2f}% to {high * 100:.2f}%")
+        print("\n  This is the number any entry signal has to beat. A rule")
+        print("  that picks graduates at the base rate has found nothing.")
 
         if hits < MIN_GRADUATES:
             print("\n" + "=" * 70)
@@ -202,12 +255,30 @@ def main() -> int:
                     buckets[field].append((feats[field], token.id in graduated))
 
         any_signal = False
+        confounded = []
         for field, label in EARLY_FEATURES:
             rows = buckets.get(field, [])
-            print(f"\n  {label}  ({len(rows)} tokens had it recorded in time)")
+            sub_hits = sum(1 for _, graduated_flag in rows if graduated_flag)
+            coverage = len(rows) / n * 100 if n else 0.0
+            print(f"\n  {label}  (recorded in time for {len(rows)} of {n} "
+                  f"eligible, {coverage:.0f}%)")
             if len(rows) < 3:
                 print("    too few to bucket")
                 continue
+
+            # Checked BEFORE the terciles, because a field whose presence
+            # predicts the outcome makes every bucket of it uninterpretable.
+            if missingness_confound(sub_hits, len(rows), hits, n):
+                sub_rate = sub_hits / len(rows) * 100
+                confounded.append(label)
+                print(f"    CONFOUNDED BY MISSINGNESS. {sub_rate:.1f}% of the "
+                      f"tokens that have")
+                print(f"    this field graduated, against a {hits / n * 100:.1f}% "
+                      f"base rate. Whether we")
+                print("    recorded it is a stronger signal than any value it")
+                print("    takes, so terciles of it measure our own coverage.")
+                continue
+
             rates = tercile_rates(rows)
             for row in rates:
                 print(f"    {row['bucket']:>6}  n={row['n']:<5} "
@@ -217,6 +288,17 @@ def main() -> int:
             if separates(rates):
                 any_signal = True
                 print("    SEPARATES: the top and bottom intervals do not overlap")
+                if field == "market_cap_usd":
+                    # Graduation happens at a market cap threshold (~$69k on
+                    # pump.fun), so a token already high at 300s is partway
+                    # there by definition. The separation is real and
+                    # observable, but it is momentum, not foresight.
+                    print("    CAUTION: graduation IS crossing a market-cap")
+                    print("    threshold, so a token already high at 300s is")
+                    print("    partway there by definition. This is momentum")
+                    print("    measured early, not a hidden property -- and")
+                    print("    the oracle run already showed the exits are")
+                    print("    where this strategy dies, not the entries.")
             else:
                 print("    no separation: the intervals overlap, so the gap is")
                 print("    within what this sample can produce by chance")
@@ -224,6 +306,12 @@ def main() -> int:
         print("\n" + "=" * 70)
         print("VERDICT")
         print("=" * 70)
+        if confounded:
+            print(f"  {len(confounded)} feature(s) unusable: "
+                  f"{', '.join(confounded)}.")
+            print("  Their presence predicts graduation better than their")
+            print("  value does, which is a fact about our collection, not")
+            print("  about the market.\n")
         if any_signal:
             print("  At least one early feature separates graduates from the")
             print("  rest. That is a candidate edge and NOT yet a strategy:")
