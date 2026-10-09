@@ -43,6 +43,10 @@ from replay import replay_token
 # assumption: 227 closes, stop set at -50%, median outcome -77%.
 MEDIAN_REALISED_LOSS = 0.77
 
+# Below this the replay is describing a handful of trades, not estimating an
+# expectancy. The first run closed 10 positions out of 693 test tokens.
+MIN_CLOSES_TO_COMPARE = 30
+
 
 def early_buys(session: Session, token: Token,
                window_s: float) -> float | None:
@@ -201,12 +205,25 @@ def main() -> int:
                                                  settings, gates)
                 if not entered or position is None or position.exit_ts is None:
                     continue
-                nets.append(position.net)
+                # ReplayPosition.net is already a PERCENTAGE; replay.py
+                # divides it by 100 to get a fraction. Treating it as a
+                # fraction and formatting with %.2f%% multiplied it by 100
+                # twice and printed a median net of -5,444%, which no
+                # position can lose.
+                nets.append(position.net / 100.0)
                 floored += 1 if position.floored else 0
             print(f"\n  {name}: {len(nets)} closed positions")
             if not nets:
                 print("    none closed, so there is nothing to compare")
                 continue
+            if len(nets) < MIN_CLOSES_TO_COMPARE:
+                print(f"    FEWER THAN {MIN_CLOSES_TO_COMPARE} CLOSES. The "
+                      f"rates above rest on hundreds of")
+                print("    tokens; this rests on a handful, because a replay")
+                print("    needs enough stored price history to enter AND to")
+                print("    find a sellable exit. Read the numbers below as a")
+                print("    description of these few trades, not as the")
+                print("    expectancy of the rule.")
             mean = sum(nets) / len(nets)
             print(f"    mean net   {mean * 100:>8.2f}%")
             print(f"    median net {statistics.median(nets) * 100:>8.2f}%")

@@ -99,3 +99,19 @@ def test_a_token_missing_the_feature_lands_in_neither_bucket():
     tokens = [type("T", (), {"id": i})() for i in range(1, 4)]
     rates = split_rate(tokens, {1: 1.0, 2: 50.0}, set(), threshold=10.0)
     assert rates["above"]["n"] + rates["below"]["n"] == 2
+
+
+def test_net_is_treated_as_a_percentage_because_that_is_what_it_is():
+    """ReplayPosition.net is a PERCENTAGE: replay.py divides it by 100 to get
+    a fraction. Treating it as a fraction multiplied it by 100 twice and
+    printed a median net of -5,444%, which no position can lose."""
+    import inspect
+
+    import signal_test
+    source = inspect.getsource(signal_test.main)
+    assert "position.net / 100.0" in source
+
+
+def test_a_tiny_replay_sample_is_labelled_as_such():
+    from signal_test import MIN_CLOSES_TO_COMPARE
+    assert MIN_CLOSES_TO_COMPARE >= 30
