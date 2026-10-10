@@ -394,3 +394,77 @@ def test_the_write_path_turns_our_fault_into_none_not_false():
     source = inspect.getsource(verify_exit)
     assert 'whose == "OURS"' in source
     assert "succeeded = None" in source
+
+
+# ------------------------------- an opaque code is not an unknown cause
+def test_jupiter_slippage_code_is_a_real_market_finding():
+    """6001 is SlippageToleranceExceeded (0x1771): the out amount fell below
+    the minimum before landing. That is the market moving, which is exactly
+    what this check exists to detect."""
+    from collector.verify import classify_failure
+    whose, explanation = classify_failure('{"InstructionError": [3, {"Custom": 6001}]}')
+    assert whose == "REAL"
+    assert "Slippage" in explanation
+
+
+def test_jupiter_invalid_token_account_code_is_our_fault():
+    """6025 is InvalidTokenAccount: an account in the transaction was
+    uninitialised or not the expected one. That is how WE built it. 21 of the
+    first 28 reverts were this, counted against the market."""
+    from collector.verify import classify_failure
+    whose, explanation = classify_failure('{"InstructionError": [1, {"Custom": 6025}]}')
+    assert whose == "OURS"
+    assert "PROVISIONAL" in explanation
+
+
+def test_the_provisional_mapping_says_so_in_the_explanation():
+    """6025 was read from a search summary of Jupiter's error table, not the
+    table itself, because this container cannot resolve those hosts. A
+    provisional basis has to travel with the classification."""
+    from collector.verify import JUPITER_ERROR_CODES
+    assert "PROVISIONAL" in JUPITER_ERROR_CODES[6025][1]
+
+
+def test_an_unlisted_custom_code_stays_unknown_and_says_what_would_resolve_it():
+    from collector.verify import classify_failure
+    whose, explanation = classify_failure('{"InstructionError": [1, {"Custom": 4242}]}')
+    assert whose == "UNKNOWN"
+    assert "logs" in explanation
+
+
+def test_the_code_is_extracted_from_the_instruction_error_shape():
+    from collector.verify import custom_error_code
+    assert custom_error_code('{"InstructionError": [2, {"Custom": 6001}]}') == 6001
+    assert custom_error_code('"InvalidAccountForFee"') is None
+
+
+def test_a_named_error_in_the_reason_wins_over_the_code():
+    """Once the logs are captured the name is present, and a name is better
+    evidence than a number from a table we could not load."""
+    from collector.verify import classify_failure
+    reason = ('{"InstructionError": [1, {"Custom": 6025}]} :: AnchorError '
+              'occurred. Error Code: SlippageToleranceExceeded.')
+    assert classify_failure(reason)[0] == "REAL"
+
+
+# ------------------------------------------- the logs were being thrown away
+def test_the_named_error_is_kept_from_the_simulation_logs():
+    from poc.sources import error_lines_from_logs
+    out = error_lines_from_logs([
+        "Program log: Instruction: Route",
+        "Program log: AnchorError occurred. Error Code: InvalidTokenAccount. "
+        "Error Number: 6025."])
+    assert "InvalidTokenAccount" in out
+    assert "Instruction: Route" not in out
+
+
+def test_duplicate_log_lines_are_not_repeated():
+    from poc.sources import error_lines_from_logs
+    line = "Program log: Error Code: Foo."
+    assert error_lines_from_logs([line, line]).count("Error Code: Foo") == 1
+
+
+def test_no_logs_yields_no_reason_rather_than_a_crash():
+    from poc.sources import error_lines_from_logs
+    assert error_lines_from_logs(None) == ""
+    assert error_lines_from_logs([]) == ""

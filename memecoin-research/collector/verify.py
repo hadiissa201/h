@@ -33,6 +33,8 @@ also be part of the thing it checks.
 
 from __future__ import annotations
 
+import re
+
 import hashlib
 import logging
 from datetime import UTC, datetime
@@ -111,6 +113,33 @@ REAL_MARKERS = (
 )
 
 
+# Jupiter's swap program reports failures as {"InstructionError": [i,
+# {"Custom": N}]}, which carries no words at all. 24 of the first 28 reverts
+# were exactly this and classified as UNKNOWN, so the rate that gates every
+# other number rested on opaque integers.
+#
+# Source: Jupiter's published program-error table (hub.jup.ag/docs/swap-api/
+# program-errors, developers.jup.ag/docs/swap/v1/common-errors). 6001 is
+# long-established and corresponds to 0x1771. 6025 was read from a search
+# summary of that table rather than from the table itself, because the dev
+# container's network policy will not resolve those hosts -- so it is marked
+# PROVISIONAL and the fix below makes the mapping unnecessary: the simulation
+# logs name the error, and we were discarding them.
+JUPITER_ERROR_CODES: dict[int, tuple[str, str]] = {
+    6001: ("REAL", "SlippageToleranceExceeded: the out amount fell below the "
+                   "minimum before landing -- the market moved"),
+    6025: ("OURS", "InvalidTokenAccount (PROVISIONAL): a token account in the "
+                   "transaction was uninitialised or not the one expected, "
+                   "which is how WE built it, not a property of the token"),
+}
+
+
+def custom_error_code(reason: str) -> int | None:
+    """The Custom error number in an InstructionError, if there is one."""
+    match = re.search(r'"Custom":\s*(\d+)', reason)
+    return int(match.group(1)) if match else None
+
+
 def classify_failure(reason: str) -> tuple[str, str]:
     """Whose fault was this revert: OURS, REAL, or UNKNOWN?
 
@@ -125,6 +154,12 @@ def classify_failure(reason: str) -> tuple[str, str]:
     for marker, explanation in REAL_MARKERS:
         if marker in reason:
             return "REAL", explanation
+    code = custom_error_code(reason)
+    if code is not None and code in JUPITER_ERROR_CODES:
+        return JUPITER_ERROR_CODES[code]
+    if code is not None:
+        return "UNKNOWN", (f"Jupiter program error {code}, not in the table we "
+                           f"have -- the simulation logs would name it")
     return "UNKNOWN", "not recognised -- read the raw reason"
 
 
@@ -340,6 +375,7 @@ def describe(counts: dict) -> str:
     return body
 
 
-__all__ = ["FAILURE_NO_HOLDER", "FAILURE_OUR_METHOD", "classify_failure",
+__all__ = ["FAILURE_NO_HOLDER", "FAILURE_OUR_METHOD",
+           "JUPITER_ERROR_CODES", "classify_failure", "custom_error_code",
            "describe", "disagreement_rate", "find_holder",
            "should_verify", "verify_exit"]

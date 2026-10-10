@@ -270,6 +270,28 @@ def simulate_sell_quote(client: httpx.Client, quote_url: str, mint: str,
                        error=f"{type(exc).__name__}: {exc}")
 
 
+# Anchor and Jupiter both print the error's NAME into the simulation logs,
+# while the err object carries only {"Custom": 6025}. We were storing the
+# number and discarding the words, so 24 of the first 28 reverts were
+# unclassifiable and the rate gating every other result rested on opaque
+# integers. These lines are what make a revert self-explaining.
+_ERROR_LOG_MARKERS = ("AnchorError", "Error Code:", "Error Message:",
+                      "insufficient", "Insufficient", "frozen", "Frozen",
+                      "custom program error")
+
+
+def error_lines_from_logs(logs: list[str] | None) -> str:
+    """The log lines that name the failure, newest-relevant first, de-duped."""
+    if not logs:
+        return ""
+    seen, kept = set(), []
+    for line in logs:
+        if any(marker in line for marker in _ERROR_LOG_MARKERS) and line not in seen:
+            seen.add(line)
+            kept.append(line.replace("Program log: ", ""))
+    return " | ".join(kept)
+
+
 def simulate_sell_rpc(client: httpx.Client, swap_url: str, rpc_url: str,
                       quote_body: dict, notional_usd: float,
                       user_public_key: str | None = None) -> Fetched:
@@ -317,12 +339,20 @@ def simulate_sell_rpc(client: httpx.Client, swap_url: str, rpc_url: str,
         body = sim.json() if sim.content else {}
         value = ((body.get("result") or {}).get("value")) or {}
         err = value.get("err")
+        # Keep the err object AND the named error from the logs. The object
+        # alone is an integer; the logs say what it means.
+        named = error_lines_from_logs(value.get("logs"))
+        reason = None
+        if err is not None:
+            reason = json.dumps(err)
+            if named:
+                reason = f"{reason} :: {named}"
         return Fetched("solana-rpc", rpc_url, sim.status_code, sim.text, now,
                        parsed=ExitSimulation(
                            method=METHOD_RPC_SIM, notional_usd=notional_usd,
                            succeeded=err is None and "result" in body,
                            failure_kind=None if err is None else FAILURE_REVERTED,
-                           failure_reason=None if err is None else json.dumps(err)[:500],
+                           failure_reason=None if reason is None else reason[:500],
                            raw=value))
     except Exception as exc:  # noqa: BLE001
         return Fetched("solana-rpc", rpc_url, None, None, now,
