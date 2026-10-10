@@ -332,3 +332,65 @@ def test_the_interval_widens_as_the_sample_shrinks():
 
 def test_no_trials_claims_nothing():
     assert verify.wilson_interval(0, 0) == (0.0, 1.0)
+
+
+# ------------------------------- our fault must never be stored as the market's
+def test_a_fee_payer_revert_is_classified_as_ours():
+    """The first four live verifications were all InvalidAccountForFee: the
+    fee payer was a PDA, so Solana rejected the transaction before the token
+    was involved. Stored as False, that reads as "this token cannot be sold"."""
+    from collector.verify import classify_failure
+    whose, _ = classify_failure("Transaction failed: InvalidAccountForFee")
+    assert whose == "OURS"
+
+
+def test_a_holder_without_the_tokens_is_ours():
+    from collector.verify import classify_failure
+    assert classify_failure("Error: insufficient funds")[0] == "OURS"
+
+
+def test_a_frozen_account_is_a_real_finding():
+    from collector.verify import classify_failure
+    assert classify_failure("Account is frozen")[0] == "REAL"
+
+
+def test_slippage_is_a_real_finding_not_our_fault():
+    """The route moved beyond tolerance before landing. That is the market."""
+    from collector.verify import classify_failure
+    assert classify_failure("SlippageToleranceExceeded")[0] == "REAL"
+
+
+def test_an_unrecognised_reason_is_unknown_and_counts_against_the_strategy():
+    """Calling an unknown reason ours would lower the false-positive rate
+    every time a new error string appeared, which is the direction that
+    quietly rescues the strategy."""
+    from collector.verify import classify_failure
+    whose, _ = classify_failure("Program log: 0xdeadbeef something new")
+    assert whose == "UNKNOWN"
+
+
+def test_the_classifier_is_in_the_collector_not_only_in_an_analysis_script():
+    """It used to live in why_reverted.py, so the collector wrote rows the
+    analysis then had to repair. repair_verifications.py exists because of
+    that split. Shared now for the same reason exit_trigger is shared."""
+    import collector.verify as cv
+    assert hasattr(cv, "classify_failure")
+    assert "classify_failure" in cv.__all__
+    from why_reverted import classify
+    assert classify is cv.classify_failure
+
+
+def test_our_method_has_its_own_failure_kind():
+    from collector.verify import FAILURE_OUR_METHOD
+    assert FAILURE_OUR_METHOD == "our_method"
+
+
+def test_the_write_path_turns_our_fault_into_none_not_false():
+    """succeeded=None means "we could not ask", which is exactly what a
+    transaction rejected before the token was involved amounts to."""
+    import inspect
+
+    from collector.verify import verify_exit
+    source = inspect.getsource(verify_exit)
+    assert 'whose == "OURS"' in source
+    assert "succeeded = None" in source

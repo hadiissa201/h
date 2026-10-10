@@ -21,47 +21,17 @@ from sqlalchemy.orm import Session
 
 from collector.config import load_settings
 from collector.models import SimulatedExit, Token
+from collector.verify import (
+    classify_failure,
+    disagreement_rate,
+    wilson_interval,
+)
 from poc.sources import METHOD_RPC_SIM
 
-# Signatures of a fault in OUR method rather than a property of the token.
-OUR_FAULT_MARKERS = (
-    ("insufficient funds", "the simulated holder did not have the tokens"),
-    ("InsufficientFunds", "the simulated holder did not have the tokens"),
-    ("AccountNotFound", "the holder's token account did not exist"),
-    ("could not find account", "the holder's token account did not exist"),
-    ("build failed", "Jupiter would not build the swap for that holder"),
-    ("no swapTransaction", "Jupiter would not build the swap for that holder"),
-    ("BlockhashNotFound", "a transient node error, not the token"),
-    # The first four live verifications were all this: the chosen fee payer was
-    # a PDA (a pool vault's owner), which cannot pay fees. Solana rejects the
-    # transaction before the token is involved, so the revert carried no
-    # information about sellability at all.
-    ("InvalidAccountForFee", "the fee payer could not pay fees (a PDA or an "
-                             "unfunded wallet) -- nothing to do with the token"),
-    ("InsufficientFundsForFee", "the fee payer had too little SOL"),
-    ("AccountNotFound", "the fee payer account does not exist"),
-)
-
-# Signatures of a genuine restriction on selling.
-REAL_MARKERS = (
-    ("frozen", "the token account is FROZEN -- a real, deliberate block"),
-    ("Frozen", "the token account is FROZEN -- a real, deliberate block"),
-    ("transfer hook", "a transfer hook rejected the sell"),
-    ("TransferHook", "a transfer hook rejected the sell"),
-    ("0x11", "SPL token error 0x11 (owner mismatch / frozen)"),
-    ("Slippage", "the route moved beyond tolerance before landing"),
-    ("slippage", "the route moved beyond tolerance before landing"),
-)
-
-
-def classify(reason: str) -> tuple[str, str]:
-    for marker, explanation in OUR_FAULT_MARKERS:
-        if marker in reason:
-            return "OURS", explanation
-    for marker, explanation in REAL_MARKERS:
-        if marker in reason:
-            return "REAL", explanation
-    return "UNKNOWN", "not recognised -- read the raw reason below"
+# The classifier now lives in collector/verify.py so the collector applies it
+# at write time instead of the analysis repairing rows afterwards. Re-exported
+# here under its old name, which repair_verifications.py imports.
+classify = classify_failure
 
 
 def main() -> int:
@@ -76,7 +46,7 @@ def main() -> int:
             .join(Token, Token.id == SimulatedExit.token_id)
             .where(SimulatedExit.method == METHOD_RPC_SIM,
                    SimulatedExit.succeeded.is_(False))
-            .order_by(SimulatedExit.simulated_ts.desc()).limit(40)).all()
+            .order_by(SimulatedExit.simulated_ts.desc()).limit(500)).all()
 
         if not rows:
             print("No failed verifications recorded yet.")
@@ -93,13 +63,63 @@ def main() -> int:
             print(f"    reason:   {reason[:300]}")
             print()
 
+        counts = disagreement_rate(session)
+
     print("=" * 70)
     print(f"  attributable to a real restriction: {verdicts['REAL']}")
     print(f"  attributable to our own method:     {verdicts['OURS']}")
     print(f"  unclassified:                      {verdicts['UNKNOWN']}")
-    if verdicts["OURS"] or verdicts["UNKNOWN"]:
-        print("\n  Any count outside REAL means the verification rate in the audit")
-        print("  is not yet a measurement of the market. Fix the method first.")
+
+    answered = counts["verified"]
+    reverts = counts["would_revert"]
+    ours = verdicts["OURS"]
+    print("\n" + "=" * 70)
+    print("THE RATE THAT GATES EVERY OTHER NUMBER")
+    print("=" * 70)
+    if not answered:
+        print("  Nothing answered, so there is no rate.")
+        return 0
+    raw = reverts / answered
+    low, high = wilson_interval(reverts, answered)
+    print(f"  as recorded      {reverts}/{answered} = {raw * 100:.1f}%  "
+          f"[{low * 100:.1f}%, {high * 100:.1f}%]")
+
+    # Our own broken transactions are not answers. Removing them from the
+    # numerator AND the denominator is the correct correction: a transaction
+    # Solana rejected before the token was involved tells us nothing either
+    # way, which is exactly what succeeded=None means.
+    net_answered = answered - ours
+    net_reverts = max(0, reverts - ours)
+    if net_answered <= 0:
+        print("\n  Every answered check was our own fault. There is no")
+        print("  measurement of the market here at all.")
+        return 0
+    corrected = net_reverts / net_answered
+    clow, chigh = wilson_interval(net_reverts, net_answered)
+    print(f"  excluding ours   {net_reverts}/{net_answered} = "
+          f"{corrected * 100:.1f}%  [{clow * 100:.1f}%, {chigh * 100:.1f}%]")
+    print("\n  Unclassified reverts are left IN the corrected numerator. An")
+    print("  unrecognised reason could be either, and calling it ours would")
+    print("  lower this rate every time a new error string appeared.")
+
+    bar = 0.10
+    if chigh < bar:
+        print(f"\n  -> PASSES the {bar * 100:.0f}% precondition once our own")
+        print("     faults are excluded. The paper exits can be trusted.")
+    elif clow >= bar:
+        print(f"\n  -> STILL FAILS the {bar * 100:.0f}% precondition. The quotes")
+        print("     are wrong about the market often enough that every return")
+        print("     figure in the project is overstated.")
+    else:
+        print(f"\n  -> UNDECIDED against the {bar * 100:.0f}% bar: the interval")
+        print("     spans it. More verifications are needed, not a different")
+        print("     reading of these ones.")
+    if ours:
+        print(f"\n  {ours} rows are our fault and still stored as False. The")
+        print("  collector now writes these as NULL at the point of discovery;")
+        print("  for the rows already in the database:")
+        print("    python repair_verifications.py          # dry run")
+        print("    python repair_verifications.py --apply")
     return 0
 
 

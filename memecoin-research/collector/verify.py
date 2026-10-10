@@ -71,6 +71,61 @@ _PROGRAM_OWNERS = frozenset({
 })
 
 FAILURE_NO_HOLDER = "no_simulatable_holder"
+# A revert caused by how WE built the transaction, not by the token. Stored
+# with succeeded=None, because the schema's three states already say what this
+# is: we tried to ask and learned nothing.
+FAILURE_OUR_METHOD = "our_method"
+
+# Signatures of a fault in our own method rather than a property of the token.
+# These lived in why_reverted.py, an analysis script, so the collector wrote
+# rows the analysis would later have to repair. Shared here for the same
+# reason exit_trigger is shared between the live trader and the replay: two
+# copies of a judgement drift, and this one decides whether a revert counts
+# against the market or against us.
+OUR_FAULT_MARKERS = (
+    ("insufficient funds", "the simulated holder did not have the tokens"),
+    ("InsufficientFunds", "the simulated holder did not have the tokens"),
+    ("AccountNotFound", "an account in the transaction did not exist"),
+    ("could not find account", "the holder's token account did not exist"),
+    ("build failed", "Jupiter would not build the swap for that holder"),
+    ("no swapTransaction", "Jupiter would not build the swap for that holder"),
+    ("BlockhashNotFound", "a transient node error, not the token"),
+    # The first four live verifications were all this: the chosen fee payer
+    # was a PDA (a pool vault's owner), which cannot pay fees. Solana rejects
+    # the transaction before the token is involved, so the revert carried no
+    # information about sellability at all.
+    ("InvalidAccountForFee", "the fee payer could not pay fees (a PDA or an "
+                             "unfunded wallet) -- nothing to do with the token"),
+    ("InsufficientFundsForFee", "the fee payer had too little SOL"),
+)
+
+# Signatures of a genuine restriction on selling.
+REAL_MARKERS = (
+    ("frozen", "the token account is FROZEN -- a real, deliberate block"),
+    ("Frozen", "the token account is FROZEN -- a real, deliberate block"),
+    ("transfer hook", "a transfer hook rejected the sell"),
+    ("TransferHook", "a transfer hook rejected the sell"),
+    ("0x11", "SPL token error 0x11 (owner mismatch / frozen)"),
+    ("Slippage", "the route moved beyond tolerance before landing"),
+    ("slippage", "the route moved beyond tolerance before landing"),
+)
+
+
+def classify_failure(reason: str) -> tuple[str, str]:
+    """Whose fault was this revert: OURS, REAL, or UNKNOWN?
+
+    UNKNOWN stays counted against the strategy. An unrecognised reason could
+    be either, and the safe direction for an unknown is the pessimistic one --
+    treating it as our fault would quietly lower the false-positive rate every
+    time a new error string appeared.
+    """
+    for marker, explanation in OUR_FAULT_MARKERS:
+        if marker in reason:
+            return "OURS", explanation
+    for marker, explanation in REAL_MARKERS:
+        if marker in reason:
+            return "REAL", explanation
+    return "UNKNOWN", "not recognised -- read the raw reason"
 
 
 def should_verify(mint: str, sample_rate: float, bucket: str = "") -> bool:
@@ -189,14 +244,33 @@ def verify_exit(session: Session, client: httpx.Client, limiters: Limiters,
     fetched = simulate_sell_rpc(client, settings.jupiter_swap_url, settings.rpc_url,
                                 quote_body, notional_usd, user_public_key=owner)
     sim: ExitSimulation = fetched.parsed
+
+    succeeded = sim.succeeded
+    failure_kind = sim.failure_kind
+    whose = ""
+    if succeeded is False:
+        whose, explanation = classify_failure(sim.failure_reason or "")
+        if whose == "OURS":
+            # Written as None at the point of discovery, not repaired later.
+            # repair_verifications.py exists because this classification used
+            # to live only in an analysis script: the collector stored our own
+            # broken transaction as "this token could not be sold", which is
+            # the one error this project most needs not to make, and the rate
+            # it corrupts is the one gating every other number.
+            succeeded = None
+            failure_kind = FAILURE_OUR_METHOD
+            log.warning("OUR FAULT, not the token's: %s -- %s",
+                        token.address[:12], explanation)
+
     insert_simulated_exit(
         session, token_id=token.id, simulated_ts=now, method=METHOD_RPC_SIM,
-        notional_usd=notional_usd, succeeded=sim.succeeded,
-        failure_kind=sim.failure_kind,
+        notional_usd=notional_usd, succeeded=succeeded,
+        failure_kind=failure_kind,
         failure_reason=(sim.failure_reason or note)[:500],
         price_impact_pct=sim.price_impact_pct)
-    verdict = {True: "would land", False: "WOULD REVERT", None: "unknown"}[sim.succeeded]
-    if sim.succeeded is False:
+    verdict = {True: "would land", False: "WOULD REVERT",
+               None: "unknown"}[succeeded]
+    if succeeded is False:
         # A quote said sellable and the chain disagreed. This is the whole
         # point of the check, so it is logged loudly rather than buried.
         log.warning("QUOTE WRONG: %s quoted sellable but simulation reverted: %s",
@@ -266,5 +340,6 @@ def describe(counts: dict) -> str:
     return body
 
 
-__all__ = ["FAILURE_NO_HOLDER", "describe", "disagreement_rate", "find_holder",
+__all__ = ["FAILURE_NO_HOLDER", "FAILURE_OUR_METHOD", "classify_failure",
+           "describe", "disagreement_rate", "find_holder",
            "should_verify", "verify_exit"]
