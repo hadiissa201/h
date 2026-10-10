@@ -508,3 +508,24 @@ def test_a_zero_tail_really_means_no_tail():
     from poc.sources import error_lines_from_logs
     out = error_lines_from_logs(["noise one", "noise two"], tail=0)
     assert out == ""
+
+
+def test_the_failing_instruction_index_is_extracted():
+    """Local corroboration for the provisional 6025 mapping, independent of a
+    docs page this container cannot reach."""
+    from collector.verify import failing_instruction
+    assert failing_instruction('{"InstructionError": [3, {"Custom": 6001}]}') == 3
+    assert failing_instruction('{"InstructionError": [1, {"Custom": 6025}]}') == 1
+    assert failing_instruction('"InvalidAccountForFee"') is None
+
+
+def test_the_observed_separation_is_what_the_argument_rests_on():
+    """Across the first 28 reverts: 6001 at instruction 3 on all 3, 6025 at
+    instruction 1 or 2 on all 21. Total separation, and the route is the later
+    instruction, so 6025 fails before a price could move against us."""
+    from collector.verify import custom_error_code, failing_instruction
+    slippage = '{"InstructionError": [3, {"Custom": 6001}]}'
+    setup = '{"InstructionError": [1, {"Custom": 6025}]}'
+    assert failing_instruction(slippage) > failing_instruction(setup)
+    assert custom_error_code(slippage) == 6001
+    assert custom_error_code(setup) == 6025

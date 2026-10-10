@@ -14,7 +14,7 @@ Read-only.
 from __future__ import annotations
 
 import sys
-from collections import Counter
+from collections import Counter, defaultdict
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -23,7 +23,9 @@ from collector.config import load_settings
 from collector.models import SimulatedExit, Token
 from collector.verify import (
     classify_failure,
+    custom_error_code,
     disagreement_rate,
+    failing_instruction,
     wilson_interval,
 )
 from poc.sources import METHOD_RPC_SIM
@@ -39,6 +41,7 @@ def main() -> int:
     # requiring the URL in the shell.
     engine = create_engine(load_settings().database_url, future=True)
     verdicts: Counter[str] = Counter()
+    where: dict[int, set[int]] = defaultdict(set)
 
     with Session(engine) as session:
         rows = session.execute(
@@ -57,6 +60,10 @@ def main() -> int:
             reason = sim.failure_reason or ""
             verdict, explanation = classify(reason)
             verdicts[verdict] += 1
+            code = custom_error_code(reason)
+            index = failing_instruction(reason)
+            if code is not None and index is not None:
+                where[code].add(index)
             print(f"  {sim.simulated_ts:%Y-%m-%d %H:%M}  {address[:16]}...")
             print(f"    verdict:  {verdict} -- {explanation}")
             print(f"    kind:     {sim.failure_kind}")
@@ -69,6 +76,16 @@ def main() -> int:
     print(f"  attributable to a real restriction: {verdicts['REAL']}")
     print(f"  attributable to our own method:     {verdicts['OURS']}")
     print(f"  unclassified:                      {verdicts['UNKNOWN']}")
+
+    if len(where) > 1:
+        print("\n  Which instruction raised each code, as a cross-check on the")
+        print("  classification that does not depend on any documentation:")
+        for code, indexes in sorted(where.items()):
+            print(f"    code {code}: instruction {sorted(indexes)}")
+        print("\n  The route is the later instruction, and the route is where a")
+        print("  price can move against you. A code raised only BEFORE it")
+        print("  cannot be the market refusing the trade -- it is the")
+        print("  transaction failing to assemble, which is ours.")
 
     answered = counts["verified"]
     reverts = counts["would_revert"]

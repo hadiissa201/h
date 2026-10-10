@@ -140,6 +140,21 @@ def custom_error_code(reason: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def failing_instruction(reason: str) -> int | None:
+    """Which instruction in the transaction raised the error.
+
+    Local corroboration for the provisional 6025 mapping, independent of a
+    documentation page this container cannot reach. Across the first 28
+    reverts the separation is total: 6001 failed at instruction 3 on all 3
+    occurrences, 6025 at instruction 1 or 2 on all 21. The route -- where a
+    price can move against you -- is the later instruction. An error raised
+    before it cannot be the market refusing the trade; it is the transaction
+    failing to assemble, which is ours.
+    """
+    match = re.search(r'"InstructionError":\s*\[\s*(\d+)', reason)
+    return int(match.group(1)) if match else None
+
+
 def classify_failure(reason: str) -> tuple[str, str]:
     """Whose fault was this revert: OURS, REAL, or UNKNOWN?
 
@@ -377,5 +392,6 @@ def describe(counts: dict) -> str:
 
 __all__ = ["FAILURE_NO_HOLDER", "FAILURE_OUR_METHOD",
            "JUPITER_ERROR_CODES", "classify_failure", "custom_error_code",
+           "failing_instruction",
            "describe", "disagreement_rate", "find_holder",
            "should_verify", "verify_exit"]
