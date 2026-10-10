@@ -129,3 +129,42 @@ finding is live, not dismissed: more winners settle it. Nothing about the
 primary number changes — `control_any` remains -26.67% [-33.67%, -19.40%],
 entirely below zero, and optimistic because 11.1% of verified exits would
 have reverted.
+
+---
+
+## Closure, 2026-10-10 — stopped without a verdict, by choice
+
+The pre-registration's answer is **NOT YET**: three of four preconditions
+fail (27 verifications at an 11.1% quote false-positive rate against a 10%
+bar, 82.4 points of abandonment spread across launchpads, 388 overdue queue
+items). All three are fixable by restarting the collector for a few days.
+
+**We are stopping anyway, and that is a different thing from a verdict.** It
+is a decision about where to spend effort, not a conclusion the data licensed.
+Recording it as such so nobody later reads "memecoin sniping was disproved"
+into a file that says "not yet".
+
+What the data does support, at the strength stated:
+
+- `control_any` mean net is **-26.67% [-33.67%, -19.40%]**, entirely below
+  zero, and optimistic: 11.1% of verified exits would have reverted on chain,
+  and a reverted sale is a sale that did not happen.
+- Every lever has been measured and closed. Exits: `headroom.py` gave the
+  entry rule a hindsight-perfect exit and expectancy stayed negative, so no
+  exit rule can rescue it. Entries: the one signal that survived a held-out
+  test (first 5m buy count >= 10, graduating at 5.80% against 0.41% below)
+  captures a median 1.33x of a 14x run, because it keys on the buying that
+  already moved the price. Stops: 96% of the avoidable loss is gap risk at a
+  60s observation interval, so a threshold cannot reach it. Size: expectancy
+  is a percentage, so sizing bounds the damage without changing the sign.
+- The crux test points the predicted way and does not carry it: winners
+  unsellable 3/35 against losers 9/400, Fisher exact p=0.0635. Live, not
+  dismissed.
+
+What would reopen it: a signal that fires BEFORE the buying rather than on
+it, or sub-second observation. Both are different projects, not parameter
+changes.
+
+Next: the spot strategies, where `docs/FINDINGS.md` names four structural
+candidates and two have never been tested -- cross-exchange arbitrage and
+liquidation cascades.
