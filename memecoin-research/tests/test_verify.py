@@ -449,13 +449,24 @@ def test_a_named_error_in_the_reason_wins_over_the_code():
 
 # ------------------------------------------- the logs were being thrown away
 def test_the_named_error_is_kept_from_the_simulation_logs():
+    """The point: the err object says 6025, the logs say InvalidTokenAccount.
+    Marker lines come FIRST so the name leads, ahead of the tail context."""
     from poc.sources import error_lines_from_logs
     out = error_lines_from_logs([
         "Program log: Instruction: Route",
         "Program log: AnchorError occurred. Error Code: InvalidTokenAccount. "
-        "Error Number: 6025."])
+        "Error Number: 6025."], tail=0)
     assert "InvalidTokenAccount" in out
     assert "Instruction: Route" not in out
+
+
+def test_the_name_still_leads_when_the_tail_is_included():
+    from poc.sources import error_lines_from_logs
+    out = error_lines_from_logs([
+        "Program log: Instruction: Route",
+        "Program log: Error Code: InvalidTokenAccount.",
+        "Program JUP failed: custom program error: 0x1789"])
+    assert out.index("InvalidTokenAccount") < out.index("Instruction: Route")
 
 
 def test_duplicate_log_lines_are_not_repeated():
@@ -468,3 +479,32 @@ def test_no_logs_yields_no_reason_rather_than_a_crash():
     from poc.sources import error_lines_from_logs
     assert error_lines_from_logs(None) == ""
     assert error_lines_from_logs([]) == ""
+
+
+def test_the_log_tail_is_kept_so_a_revert_can_be_diagnosed_not_just_classified():
+    """Marker lines classify a revert. Diagnosing it needs the failing
+    instruction and the program that raised it, which are in the tail. 21
+    reverts were InvalidTokenAccount with the cause still unknown."""
+    from poc.sources import error_lines_from_logs
+    out = error_lines_from_logs([
+        "Program log: Instruction: Route",
+        "Program ABC invoke [2]",
+        "Program ABC consumed 12345 compute units",
+        "Program ABC failed: custom program error: 0x1789"])
+    assert "Program ABC invoke [2]" in out
+    assert "0x1789" in out
+
+
+def test_marker_lines_are_not_duplicated_by_the_tail():
+    from poc.sources import error_lines_from_logs
+    line = "Program log: Error Code: InvalidTokenAccount."
+    out = error_lines_from_logs(["a", "b", line])
+    assert out.count("InvalidTokenAccount") == 1
+
+
+def test_a_zero_tail_really_means_no_tail():
+    """logs[-0:] is logs[0:] -- the whole list. Without a guard, asking for no
+    tail returns everything, which is the opposite of the request."""
+    from poc.sources import error_lines_from_logs
+    out = error_lines_from_logs(["noise one", "noise two"], tail=0)
+    assert out == ""

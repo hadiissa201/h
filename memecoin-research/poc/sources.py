@@ -280,13 +280,28 @@ _ERROR_LOG_MARKERS = ("AnchorError", "Error Code:", "Error Message:",
                       "custom program error")
 
 
-def error_lines_from_logs(logs: list[str] | None) -> str:
-    """The log lines that name the failure, newest-relevant first, de-duped."""
+def error_lines_from_logs(logs: list[str] | None, tail: int = 4) -> str:
+    """The log lines that name the failure, de-duped, plus the tail.
+
+    Marker lines alone are not enough to DIAGNOSE a revert, only to classify
+    it. 21 of the first 28 reverts were InvalidTokenAccount and the cause is
+    still unknown -- a stale quote whose route has since migrated, a missing
+    destination account on a holder we do not control, or the holder itself.
+    Deciding between those needs the failing instruction and the program that
+    raised it, which live in the last few lines. Kept so the next run answers
+    the question instead of posing it again.
+    """
     if not logs:
         return ""
     seen, kept = set(), []
     for line in logs:
         if any(marker in line for marker in _ERROR_LOG_MARKERS) and line not in seen:
+            seen.add(line)
+            kept.append(line.replace("Program log: ", ""))
+    # logs[-0:] is logs[0:], the whole list, so tail=0 must be guarded rather
+    # than relied on to mean "no tail".
+    for line in (logs[-tail:] if tail > 0 else []):
+        if line not in seen:
             seen.add(line)
             kept.append(line.replace("Program log: ", ""))
     return " | ".join(kept)
