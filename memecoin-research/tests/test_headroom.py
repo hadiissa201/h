@@ -112,3 +112,33 @@ def test_the_threshold_is_the_one_confirmed_out_of_sample_not_refitted():
     """Refitting the threshold on the graduates it is measured against would
     be the survivorship error one layer down."""
     assert BUYS_THRESHOLD == 10.0
+
+
+# ------------------------------------------- the right statistic for a payoff
+def test_expectancy_uses_the_mean_winner_because_the_payoff_is_a_power_law():
+    """The first version of this script used the MEDIAN winner. Almost all of
+    a memecoin return sits in a few outcomes, so the median understates what
+    the strategy collects -- an error against the rule rather than for it, and
+    wrong either way. On the real run the median said -70.83% and the mean
+    said -61.50%."""
+    import inspect
+
+    import headroom
+    source = inspect.getsource(headroom.main)
+    assert "MEAN winner" in source
+    assert "sum(nets) / len(nets)" in source
+
+
+def test_a_mean_carried_by_one_token_is_exposed():
+    """34 winners with a 217x among them: a strategy whose edge is one trade
+    has not been measured, it has been witnessed."""
+    import inspect
+
+    import headroom
+    source = inspect.getsource(headroom.main)
+    assert "drop the single best winner" in source
+
+
+def test_dropping_the_best_winner_lowers_the_mean_gain():
+    nets = [0.1, 0.2, 0.3, 50.0]
+    assert sum(sorted(nets)[:-1]) / 3 < sum(nets) / 4

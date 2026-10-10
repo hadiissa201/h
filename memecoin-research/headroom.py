@@ -205,16 +205,37 @@ def main() -> int:
               f"   (held out, never fitted)")
         print(f"  median realised loss          "
               f"-{MEDIAN_REALISED_LOSS * 100:.0f}%     (measured, 227 closes)")
+        print("\n  Expectancy takes the MEAN winner, not the median. A")
+        print("  memecoin payoff is a power law: almost all of the return is")
+        print("  in a few outcomes, so the median winner understates what the")
+        print("  strategy actually collects. The first version of this script")
+        print("  used the median and so was unfair to the rule.")
         for label, nets in (("chart", chart_nets), ("sellable", sell_nets)):
             if not nets:
                 print(f"\n  {label}: no data")
                 continue
-            gain = statistics.median(nets)
-            value = expectancy(OUT_OF_SAMPLE_WIN_RATE, gain)
-            print(f"\n  using the MEDIAN {label} winner (+{gain * 100:,.0f}%):")
-            print(f"    expectancy per trade  {value * 100:>+8.2f}%")
-            print(f"    {'PROFITABLE' if value > 0 else 'STILL LOSES'} "
-                  f"even with a perfect exit")
+            mean_gain = sum(nets) / len(nets)
+            value = expectancy(OUT_OF_SAMPLE_WIN_RATE, mean_gain)
+            print(f"\n  {label}, MEAN winner +{mean_gain * 100:,.0f}%:")
+            print(f"    expectancy per trade  {value * 100:>+8.2f}%   "
+                  f"{'PROFITABLE' if value > 0 else 'STILL LOSES'}")
+
+            # How much of that rests on one token. With 34 winners a single
+            # 217x outcome can carry the whole mean, and a strategy whose
+            # edge is one trade has not been measured, it has been witnessed.
+            trimmed = sorted(nets)[:-1]
+            if trimmed:
+                trimmed_gain = sum(trimmed) / len(trimmed)
+                trimmed_value = expectancy(OUT_OF_SAMPLE_WIN_RATE, trimmed_gain)
+                share = ((mean_gain - trimmed_gain) / mean_gain * 100
+                         if mean_gain else 0.0)
+                print(f"    drop the single best winner: mean falls to "
+                      f"+{trimmed_gain * 100:,.0f}%")
+                print(f"    expectancy then       {trimmed_value * 100:>+8.2f}%"
+                      f"   ({share:.0f}% of the mean was that one token)")
+            median_gain = statistics.median(nets)
+            print(f"    for reference, median winner +{median_gain * 100:,.0f}%"
+                  f" -> {expectancy(OUT_OF_SAMPLE_WIN_RATE, median_gain) * 100:+.2f}%")
         print("\n  A negative number here is close to decisive. The exit was")
         print("  chosen with full hindsight and the entry was the real one, so")
         print("  no exit rule can do better than this. Only a higher win rate")
