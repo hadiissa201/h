@@ -94,3 +94,73 @@ def test_an_unmeasured_false_positive_rate_cannot_pass_the_precondition():
     source = inspect.getsource(verdict.main)
     assert 'rate is not None' in source
     assert '"quote_false_positive_rate"' in source
+
+
+# ------------------------------------------- the crux test, which was vacuous
+class Pos:
+    def __init__(self, peak, unrealisable, strategy="control_any"):
+        self.peak_multiple = peak
+        self.unrealisable_peak_multiple = unrealisable
+        self.strategy = strategy
+        self.is_open = False
+        self.token_id = 1
+
+
+def exitability(positions, target=3.0, monkeypatch=None):
+    """Call the real function against an in-memory stand-in session."""
+    import verdict
+
+    class FakeSession:
+        def scalars(self, _query):
+            class R:
+                def all(_self):
+                    return positions
+            return R()
+
+    original = verdict.TARGETS
+    verdict.TARGETS = {"control_any": target}
+    try:
+        return verdict.exitability_by_outcome(FakeSession(), "control_any")
+    finally:
+        verdict.TARGETS = original
+
+
+def test_an_unsellable_peak_counts_as_not_sellable():
+    """The whole point. A position that touched 6x on the chart but could only
+    ever have exited at 1.2x did NOT have a sellable win, and the first
+    version of this test called it sellable because the token had produced a
+    successful exit at some other moment."""
+    rows = exitability([Pos(peak=1.2, unrealisable=6.0)])
+    assert rows["reached target"]["n"] == 1
+    assert rows["reached target"]["sellable"] == 0
+
+
+def test_a_peak_that_was_reachable_counts_as_sellable():
+    rows = exitability([Pos(peak=4.0, unrealisable=4.0)])
+    assert rows["reached target"]["sellable"] == 1
+
+
+def test_winners_and_losers_are_split_by_the_best_price_either_way():
+    """A win is a win whether or not it could be sold, otherwise unsellable
+    wins vanish from the numerator AND the denominator."""
+    rows = exitability([Pos(peak=1.1, unrealisable=9.0),
+                        Pos(peak=0.4, unrealisable=0.4)])
+    assert rows["reached target"]["n"] == 1
+    assert rows["stayed at a loss"]["n"] == 1
+
+
+def test_the_thesis_fails_when_winners_are_less_sellable_than_losers():
+    """The decision rule written down on 2026-09-30, verbatim: if positions at
+    or above the profit target are sellable less often than positions at a
+    loss, the thesis fails regardless of mean return."""
+    rows = exitability([Pos(peak=1.0, unrealisable=8.0)] * 10
+                       + [Pos(peak=0.3, unrealisable=0.3)] * 10)
+    assert rows["reached target"]["rate"] < rows["stayed at a loss"]["rate"]
+
+
+def test_it_no_longer_reports_everything_sellable_by_construction():
+    """The bug: 35 of 35 and 400 of 400, from asking whether the token had
+    ever produced a successful exit -- which it must have, to have opened a
+    position at all."""
+    rows = exitability([Pos(peak=1.0, unrealisable=5.0)] * 5)
+    assert rows["reached target"]["rate"] == 0.0

@@ -37,7 +37,6 @@ from collector.config import load_settings
 from collector.models import (
     Observation,
     PaperPosition,
-    SimulatedExit,
     Token,
     WorkItem,
 )
@@ -103,26 +102,35 @@ def abandonment_by_source(session: Session) -> dict[str, tuple[int, int]]:
 
 
 def exitability_by_outcome(session: Session, strategy: str) -> dict:
-    """Was a verified sale available, split by whether the target was reached.
+    """Could the best moment actually be sold, split by whether it was a win?
 
-    Split, never pooled. Pooling is what hides the failure mode the
-    pre-registration singled out: an average computed over available exits,
-    with the unavailable ones being exactly the wins.
+    THE FIRST VERSION OF THIS WAS A TAUTOLOGY. It asked whether the token had
+    ever produced a successful simulated exit -- and every token carrying a
+    paper position necessarily has, because that is what opened and closed it.
+    So it reported 100% sellable in both groups, on 35 winners and 400 losers,
+    and concluded the thesis survived. It measured nothing, and it failed in
+    the direction that flattered the strategy.
+
+    The right instrument was already in the schema.
+    `unrealisable_peak_multiple` records what the position WOULD have made if
+    an exit had always been available; `peak_multiple` records what was
+    actually reachable. When the first exceeds the second, the best moment
+    could not be sold. That is the question the pre-registration asked.
     """
     target = TARGETS.get(strategy, 3.0)
-    sellable_tokens = {row for row in session.scalars(
-        select(SimulatedExit.token_id)
-        .where(SimulatedExit.succeeded.is_(True)).distinct())}
     groups: dict[str, list[bool]] = defaultdict(list)
     positions = session.scalars(
         select(PaperPosition).where(PaperPosition.strategy == strategy,
                                     PaperPosition.is_open.is_(False))).all()
     for position in positions:
-        peak = float(position.peak_multiple or 0.0)
-        unrealisable = float(position.unrealisable_peak_multiple or 0.0)
-        reached = max(peak, unrealisable) >= target
-        groups["reached target" if reached else "stayed at a loss"].append(
-            position.token_id in sellable_tokens)
+        realisable = float(position.peak_multiple or 0.0)
+        wanted = float(position.unrealisable_peak_multiple or 0.0)
+        best = max(realisable, wanted)
+        # No penalty means the best price the position saw was a price it
+        # could have sold into.
+        sellable = realisable >= best - 1e-9
+        groups["reached target" if best >= target
+               else "stayed at a loss"].append(sellable)
     out = {}
     for name, flags in groups.items():
         hits = sum(1 for f in flags if f)
@@ -210,6 +218,16 @@ def main() -> int:
         print(f"  mean net        {mean * 100:>+8.2f}%")
         print(f"  95% interval    [{low * 100:+.2f}%, {high * 100:+.2f}%]")
         print(f"  median net      {statistics.median(nets) * 100:>+8.2f}%")
+        # The quote false-positive rate decides whether this number means
+        # anything. Over half the paper exits reverting on chain does not make
+        # the return uncertain in both directions: a reverted sale is a sale
+        # that did not happen, so the true figure is WORSE than the one above,
+        # by an amount nothing here measures.
+        if rate is not None and rate >= MAX_FALSE_POSITIVE_RATE:
+            print(f"\n  Read with the precondition in mind: {rate * 100:.1f}% of "
+                  f"verified exits")
+            print("  would have reverted on chain. Those sales did not happen,")
+            print("  so this figure is optimistic, not merely uncertain.")
         if high < 0:
             primary = "UNPROFITABLE"
             consequence = "Stop. Do not fund."
