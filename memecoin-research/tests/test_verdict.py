@@ -164,3 +164,48 @@ def test_it_no_longer_reports_everything_sellable_by_construction():
     position at all."""
     rows = exitability([Pos(peak=1.0, unrealisable=5.0)] * 5)
     assert rows["reached target"]["rate"] == 0.0
+
+
+# ------------------------------- a rate comparison is not a comparison
+def test_the_crux_requires_significance_not_just_a_direction():
+    """The live run fired THESIS FAILS on 32/35 against 391/400, whose
+    intervals overlap, at p=0.064. The project's most consequential verdict
+    rested on two point estimates."""
+    from collector.verify import fisher_exact
+    assert fisher_exact(3, 32, 9, 391) > 0.05
+
+
+def test_a_stark_difference_still_fails_the_thesis():
+    """The tightening must not make the test unfailable: a real gap clears it
+    easily."""
+    from collector.verify import fisher_exact
+    assert fisher_exact(30, 5, 5, 395) < 0.05
+
+
+def test_identical_rates_give_p_of_essentially_one():
+    """Summing the tail probabilities will not land exactly on 1.0, so the
+    assertion is approximate -- the code is right and an exact comparison
+    would be the test being wrong."""
+    from collector.verify import fisher_exact
+    assert fisher_exact(5, 95, 5, 95) > 0.999
+
+
+def test_an_empty_group_cannot_produce_a_significant_difference():
+    from collector.verify import fisher_exact
+    assert fisher_exact(0, 0, 9, 391) == 1.0
+
+
+def test_the_amendment_is_recorded_in_the_pre_registration():
+    """A pre-registered kill criterion was loosened after seeing the data, in
+    the direction that favours the strategy. The document requires any change
+    to be dated and to say what prompted it."""
+    from pathlib import Path
+    text = Path("docs/DECISION.md").read_text()
+    assert "Amendment, 2026-10-10" in text
+    assert "favours the strategy" in text
+    assert "0.0635" in text
+
+
+def test_the_alpha_is_declared_next_to_the_amendment_date():
+    import verdict
+    assert verdict.CRUX_ALPHA == 0.05

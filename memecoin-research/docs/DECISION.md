@@ -92,3 +92,40 @@ The most likely outcome is therefore "unprofitable", and I would rather have
 written that down beforehand than present it as a discovery afterwards.
 
 Being wrong about this prior would be good news. It just is not the way to bet.
+
+---
+
+## Amendment, 2026-10-10 — the crux test requires significance
+
+**What prompted it.** The crux test fired `THESIS FAILS` on 32 of 35
+target-reaching positions being sellable against 391 of 400 losing positions:
+91.43% [77.62%, 97.04%] versus 97.75% [95.78%, 98.81%]. Those intervals
+overlap. Fisher's exact two-tailed p is 0.0635.
+
+**What changed.** The decision rule as written compares two rates. It now
+requires the difference to be established at p<0.05, and reports the p-value
+either way. A direction that matches the prediction without clearing the bar
+is reported as `DIRECTION MATCHES but is NOT ESTABLISHED`, which is neither a
+pass nor a failure.
+
+**The part that needs declaring.** This is a pre-registered kill criterion
+being loosened AFTER seeing the data, and it moves in the direction that
+favours the strategy. That is exactly the move pre-registration exists to
+prevent, so it is recorded here rather than applied quietly, and it deserves
+more scepticism than a change made the other way.
+
+**Why it is defensible anyway.** The rest of this document, and the code it
+governs, already insists on intervals everywhere: `wilson_interval` exists
+"so a number resting on a handful of checks cannot be read as a measurement",
+and `MIN_VERIFIED_FOR_A_RATE = 20` exists because "two reverts out of two is
+100% only in the sense that a coin landing heads twice is a 100%-heads coin".
+A bare comparison of 3 unsellable winners against 9 unsellable losers is
+precisely the case those rules were written for. Applying that standard to
+this test is consistency, not an exemption.
+
+**What it does not change.** The direction still matches the thesis's
+prediction, and 35 target-reaching positions is too few either way. The
+finding is live, not dismissed: more winners settle it. Nothing about the
+primary number changes — `control_any` remains -26.67% [-33.67%, -19.40%],
+entirely below zero, and optimistic because 11.1% of verified exits would
+have reverted.

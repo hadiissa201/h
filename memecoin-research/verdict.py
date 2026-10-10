@@ -41,7 +41,11 @@ from collector.models import (
     WorkItem,
 )
 from collector.paper import ALL_STRATEGIES
-from collector.verify import disagreement_rate, wilson_interval
+from collector.verify import (
+    disagreement_rate,
+    fisher_exact,
+    wilson_interval,
+)
 
 BASELINE = "control_any"
 MIN_CLOSED = 100
@@ -49,6 +53,8 @@ MIN_VERIFICATIONS = 20
 MAX_FALSE_POSITIVE_RATE = 0.10
 MAX_ABANDONMENT_SPREAD = 0.15
 TARGETS = {s.name: s.take_profit_multiple for s in ALL_STRATEGIES}
+# Amended 2026-10-10; see docs/DECISION.md.
+CRUX_ALPHA = 0.05
 
 
 def net_return(position: PaperPosition) -> float | None:
@@ -257,7 +263,30 @@ def main() -> int:
         losers = groups.get("stayed at a loss")
         crux = None
         if winners and losers and winners["n"] and losers["n"]:
-            crux = winners["rate"] < losers["rate"]
+            # A rate comparison is not a comparison until the difference is
+            # established. The first version fired the project's most
+            # consequential verdict off two point estimates whose intervals
+            # overlapped, at p=0.064. See the 2026-10-10 amendment in
+            # docs/DECISION.md: this tightening was made AFTER seeing the
+            # data and it makes the thesis harder to fail, so it is recorded
+            # rather than applied quietly.
+            w_bad = winners["n"] - winners["sellable"]
+            l_bad = losers["n"] - losers["sellable"]
+            pvalue = fisher_exact(w_bad, winners["sellable"],
+                                  l_bad, losers["sellable"])
+            print(f"\n  unsellable: {w_bad}/{winners['n']} of winners vs "
+                  f"{l_bad}/{losers['n']} of losers")
+            print(f"  Fisher exact two-tailed p = {pvalue:.4f}")
+            directional = winners["rate"] < losers["rate"]
+            crux = directional and pvalue < CRUX_ALPHA
+            if directional and not crux:
+                print(f"\n  -> DIRECTION MATCHES but is NOT ESTABLISHED at "
+                      f"p<{CRUX_ALPHA}. The winners")
+                print("     were less sellable in this sample, which is what")
+                print("     the thesis predicts, and the sample cannot carry")
+                print("     the claim. More target-reaching positions would")
+                print("     settle it; there are only "
+                      f"{winners['n']}.")
             if crux:
                 print("\n  -> THESIS FAILS. Positions that reached the target were")
                 print("     sellable less often than positions at a loss, so the")

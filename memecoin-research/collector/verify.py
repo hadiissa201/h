@@ -34,6 +34,7 @@ also be part of the thing it checks.
 from __future__ import annotations
 
 import re
+from math import comb
 
 import hashlib
 import logging
@@ -361,6 +362,34 @@ def disagreement_rate(session: Session) -> dict:
 MIN_VERIFIED_FOR_A_RATE = 20
 
 
+def fisher_exact(a: int, b: int, c: int, d: int) -> float:
+    """Two-tailed p for a 2x2 table. No scipy, exact at the sizes here.
+
+    Needed because comparing two rates by their point estimates is not a
+    comparison. 3 of 35 against 9 of 400 looks like a four-fold difference
+    and does not clear p=0.05, and the project has made that mistake in both
+    directions already.
+    """
+    n = a + b + c + d
+    if n == 0 or (a + b) == 0 or (c + d) == 0:
+        return 1.0
+
+    def table_p(w: int, x: int, y: int, z: int) -> float:
+        return (comb(w + x, w) * comb(y + z, y)) / comb(n, w + y)
+
+    observed = table_p(a, b, c, d)
+    total = 0.0
+    for i in range(min(a + b, a + c) + 1):
+        j, k = a + b - i, a + c - i
+        rest = c + d - k
+        if j < 0 or k < 0 or rest < 0:
+            continue
+        p = table_p(i, j, k, rest)
+        if p <= observed * (1 + 1e-12):
+            total += p
+    return min(1.0, total)
+
+
 def wilson_interval(successes: int, trials: int, z: float = 1.96) -> tuple[float, float]:
     """95% CI for a proportion, correct at small n where the normal one is not.
 
@@ -392,6 +421,6 @@ def describe(counts: dict) -> str:
 
 __all__ = ["FAILURE_NO_HOLDER", "FAILURE_OUR_METHOD",
            "JUPITER_ERROR_CODES", "classify_failure", "custom_error_code",
-           "failing_instruction",
+           "failing_instruction", "fisher_exact",
            "describe", "disagreement_rate", "find_holder",
            "should_verify", "verify_exit"]
