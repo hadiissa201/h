@@ -111,3 +111,48 @@ def test_never_positive_gives_an_upper_bound_not_a_certainty():
     low, high = wilson(0, 60)
     assert low == 0.0
     assert 0.0 < high < 0.10
+
+
+# ----------------------------------------- venues do not agree on level shape
+def test_a_three_element_level_is_read_not_rejected():
+    """Kraken's book levels are [price, volume, timestamp] and ccxt passes the
+    third element through. Unpacking exactly two killed a 60-sample run on its
+    first Kraken fetch."""
+    fill = walk_book([[100.0, 50.0, 1760000000]], notional=1000.0)
+    assert fill is not None
+    assert fill.vwap == 100.0
+    assert fill.complete
+
+
+def test_a_malformed_level_is_skipped_rather_than_crashing():
+    fill = walk_book([[100.0], [], [101.0, 50.0]], notional=1000.0)
+    assert fill is not None
+    assert fill.vwap == 101.0
+
+
+def test_mixed_level_shapes_in_one_book_both_count():
+    fill = walk_book([[100.0, 1.0, 1760000000], [101.0, 100.0]], 1000.0)
+    assert 100.0 < fill.vwap < 101.0
+    assert fill.levels_used == 2
+
+
+def test_the_better_of_the_two_directions_is_chosen():
+    """Buy where it is cheap, sell where it is dear -- and which venue that is
+    flips sample to sample."""
+    from cross_exchange import _best_direction
+    cheap = {"asks": [[100.0, 100.0]], "bids": [[99.9, 100.0]]}
+    dear = {"asks": [[102.0, 100.0]], "bids": [[101.9, 100.0]]}
+    fees = {"x": 0.0, "y": 0.0}
+    best = _best_direction(cheap, dear, "x", "y", fees, 1000.0)
+    assert best is not None
+    assert best[1] == "x" and best[2] == "y"
+    assert best[0] > 0
+
+
+def test_a_side_too_thin_for_the_size_is_counted_not_traded():
+    from cross_exchange import _best_direction
+    thin = {"asks": [[100.0, 0.001]], "bids": [[99.0, 0.001]]}
+    deep = {"asks": [[101.0, 100.0]], "bids": [[100.5, 100.0]]}
+    fees = {"x": 0.0, "y": 0.0}
+    best = _best_direction(thin, deep, "x", "y", fees, 1000.0)
+    assert best is None or best[3] > 0

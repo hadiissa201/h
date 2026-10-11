@@ -78,8 +78,13 @@ def walk_book(levels: list[list[float]], notional: float) -> Fill | None:
     spent = 0.0
     base = 0.0
     used = 0
-    for price, amount in levels:
-        price, amount = float(price), float(amount)
+    for level in levels:
+        # Kraken's levels carry a third element (a timestamp) and ccxt passes
+        # it through, so unpacking exactly two raised ValueError mid-run.
+        # Taking the first two is right for every venue: price then amount.
+        if not level or len(level) < 2:
+            continue
+        price, amount = float(level[0]), float(level[1])
         if price <= 0 or amount <= 0:
             continue
         used += 1
@@ -138,6 +143,33 @@ def summarise(edges: list[float], notional: float, fees: dict) -> dict:
     }
 
 
+def _best_direction(book_a: dict, book_b: dict, a: str, b: str,
+                    fees: dict, notional: float,
+                    on_incomplete=None) -> tuple | None:  # noqa: ANN001
+    """Best net edge across both directions, plus how many sides were too thin.
+
+    Returns (edge, buy_venue, sell_venue, incomplete_count) or None.
+    """
+    best = None
+    incomplete = 0
+    for buy_venue, sell_venue in ((a, b), (b, a)):
+        buy_book = book_a if buy_venue == a else book_b
+        sell_book = book_a if sell_venue == a else book_b
+        buy = walk_book(buy_book.get("asks") or [], notional)
+        sell = walk_book(sell_book.get("bids") or [], notional)
+        if buy is None or sell is None:
+            continue
+        if not (buy.complete and sell.complete):
+            incomplete += 1
+            continue
+        edge = net_edge(buy, fees[buy_venue], sell, fees[sell_venue])
+        if best is None or edge > best[0]:
+            best = (edge, buy_venue, sell_venue, incomplete)
+    if best is None:
+        return None
+    return (best[0], best[1], best[2], incomplete)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exchanges", nargs=2, default=["binance", "kraken"])
@@ -192,20 +224,21 @@ def main() -> int:
             continue
 
         # Both directions: buy where it is cheap, sell where it is dear.
+        # Wrapped because one malformed book should cost one sample, not the
+        # whole run -- a Kraken level with three fields ended a 60-sample run
+        # on its first fetch.
         best = None
-        for buy_venue, sell_venue in ((a, b), (b, a)):
-            buy_book = book_a if buy_venue == a else book_b
-            sell_book = book_a if sell_venue == a else book_b
-            buy = walk_book(buy_book.get("asks") or [], args.notional)
-            sell = walk_book(sell_book.get("bids") or [], args.notional)
-            if buy is None or sell is None:
-                continue
-            if not (buy.complete and sell.complete):
-                incomplete += 1
-                continue
-            edge = net_edge(buy, fees[buy_venue], sell, fees[sell_venue])
-            if best is None or edge > best[0]:
-                best = (edge, buy_venue, sell_venue)
+        try:
+            best = _best_direction(book_a, book_b, a, b, fees, args.notional,
+                                   on_incomplete=lambda: None)
+        except Exception as exc:  # noqa: BLE001
+            errors += 1
+            if errors <= 3:
+                print(f"  sample {i + 1}: {type(exc).__name__}: {exc}")
+            time.sleep(args.interval)
+            continue
+        if best is not None and best[3]:
+            incomplete += best[3]
         if best is None:
             continue
         edge = best[0]
