@@ -156,3 +156,38 @@ def test_a_side_too_thin_for_the_size_is_counted_not_traded():
     fees = {"x": 0.0, "y": 0.0}
     best = _best_direction(thin, deep, "x", "y", fees, 1000.0)
     assert best is None or best[3] > 0
+
+
+# ------------------------------- the verdict must agree with its own table
+def test_zero_positive_samples_reads_as_no_edge():
+    """The live run had 0 of 55 positive and printed "positive edges occur",
+    because the branch tested the Wilson upper bound -- which is never exactly
+    zero -- instead of the count."""
+    stats = summarise([-0.0035] * MIN_SAMPLES, 1000.0,
+                      {"binance": 0.0010, "kraken": 0.0026})
+    assert stats["positive"] == 0
+
+
+def test_the_gross_spread_is_reported_so_the_cause_is_visible():
+    """Net alone cannot tell "the fees are too high" from "the venues agree on
+    the price". The first is a fee-tier problem; the second means no fee
+    schedule or faster connection would help."""
+    fees = {"binance": 0.0010, "kraken": 0.0026}
+    stats = summarise([-0.003543] * MIN_SAMPLES, 1000.0, fees)
+    assert abs(stats["median_gross"] - 0.000057) < 1e-9
+    assert stats["fee_hurdle"] == 0.0036
+
+
+def test_a_gross_spread_below_the_hurdle_means_no_dislocation():
+    """The live numbers: best gross 1.62 bp against a 36 bp hurdle. Nothing
+    about costs explains that -- the venues simply agree."""
+    fees = {"binance": 0.0010, "kraken": 0.0026}
+    stats = summarise([-0.003438] * MIN_SAMPLES, 1000.0, fees)
+    assert stats["best_gross"] < stats["fee_hurdle"]
+    assert stats["best_gross"] * 10000 < 2.0
+
+
+def test_a_wide_gross_spread_eaten_by_fees_is_a_different_finding():
+    fees = {"a": 0.0026, "b": 0.0060}
+    stats = summarise([-0.001] * MIN_SAMPLES, 1000.0, fees)
+    assert stats["best_gross"] > stats["fee_hurdle"] * 0.5

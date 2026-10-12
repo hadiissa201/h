@@ -565,3 +565,58 @@ part: sniper timing was indistinguishable, authority filters could not
 differentiate, trend following was survivorship bias, memecoin exits cannot be
 stopped at the level they are set, and low volatility is a variance effect
 wearing an anomaly's clothes.
+
+## Cross-exchange arbitrage: the venues agree on the price (2026-10-12)
+
+The third of the four structural candidates this document named, and the
+second to be closed with evidence rather than argument.
+
+BTC/USDT on Binance and Kraken, $1,000 per capture, 55 usable samples five
+seconds apart, order books walked to the full notional rather than read off
+the top:
+
+| | |
+|---|---|
+| samples with a positive net edge | **0 of 55** — 0.0% [0.0%, 6.5%] |
+| median gross spread | **+0.57 bp** |
+| best gross spread | **+1.62 bp** |
+| round-trip fee hurdle | **36 bp** |
+| median net on notional | **-0.3543%** |
+| median net on capital | **-0.1771%** |
+| a positive edge still positive 5s later | **0 of 54** |
+
+**The fees are not the reason, and that matters.** A net figure alone cannot
+tell "the costs are too high" from "there is nothing there", and those have
+opposite implications: the first is a fee-tier negotiation, the second is
+dead. The best gross spread observed across 55 samples was **1.62 basis
+points**. The two venues price Bitcoin within a fraction of a basis point of
+each other. No fee schedule, no VIP tier and no faster connection changes
+that, because the dislocation the strategy exists to exploit is not present at
+this size on these venues.
+
+Reading the capital column matters here as it did for funding carry. Capturing
+a spread without waiting for a chain transfer means holding the base asset
+where you will sell it and the quote where you will buy, so a $1,000 capture
+ties up about $2,000. Every figure above halves on that basis.
+
+**And nothing persisted.** Zero of 54 opportunities to check found a positive
+edge still positive five seconds later. Even if a spread had cleared the
+hurdle, it was gone before an order could reach it.
+
+What this does not say: that no cross-exchange edge exists anywhere. Thinner
+venues, smaller caps, or a market-making posture instead of taking are all
+untested, and each has a worse version of the same problem — the spread widens
+where the inventory risk and the counterparty risk widen with it.
+
+```bash
+python scripts/cross_exchange.py --samples 60 --interval 5
+```
+
+**Structural candidates, after this:**
+
+| Candidate | Status |
+|---|---|
+| funding-rate carry | measured +3.00%/yr on capital; dead, USDT lending pays ~6% |
+| cross-exchange arbitrage | **dead; the venues agree to within 1.62 bp** |
+| liquidation cascades | untested — needs a live liquidation feed collected forward |
+| market making | untested — retail is the adversely selected side |

@@ -131,10 +131,16 @@ def summarise(edges: list[float], notional: float, fees: dict) -> dict:
         return {"enough": False, "n": len(edges)}
     positive = sum(1 for e in edges if e > 0)
     on_capital = [e / capital_multiple() for e in edges]
+    hurdle = sum(fees.values())
     return {
         "enough": True,
         "n": len(edges),
         "positive": positive,
+        # Net alone cannot tell "the fees are too high" from "the venues
+        # agree on the price". The first is a fee-tier problem, the second
+        # means no dislocation exists and no fee schedule would help.
+        "median_gross": statistics.median(edges) + hurdle,
+        "best_gross": max(edges) + hurdle,
         "median": statistics.median(edges),
         "best": max(edges),
         "worst": min(edges),
@@ -270,6 +276,11 @@ def main() -> int:
     print(f"  {stats['n']} samples, {stats['positive']} with a positive net edge")
     print(f"  {stats['positive'] / stats['n'] * 100:.1f}% "
           f"[{low * 100:.1f}%, {high * 100:.1f}%]")
+    print(f"\n  median GROSS spread          {stats['median_gross'] * 100:+.4f}%"
+          f"   ({stats['median_gross'] * 10000:+.2f} bp)")
+    print(f"  best GROSS spread            {stats['best_gross'] * 100:+.4f}%"
+          f"   ({stats['best_gross'] * 10000:+.2f} bp)")
+    print(f"  round-trip fee hurdle        {stats['fee_hurdle'] * 100:+.4f}%")
     print(f"\n  median net edge on notional  {stats['median'] * 100:+.4f}%")
     print(f"  median net edge on CAPITAL   "
           f"{stats['median_on_capital'] * 100:+.4f}%   "
@@ -287,9 +298,25 @@ def main() -> int:
     print("\n" + "=" * 70)
     print("VERDICT")
     print("=" * 70)
-    if high <= 0.0:
-        print("  NO EDGE. The net spread was never positive, so there is")
-        print("  nothing to capture at this size on these venues.")
+    if stats["positive"] == 0:
+        # Branching on the Wilson upper bound put a run with ZERO positive
+        # samples into the "positive edges occur" message, because that bound
+        # is never exactly 0. A verdict has to agree with the table above it.
+        print(f"  NO EDGE. Not one of {stats['n']} samples was positive after")
+        print(f"  fees, and the upper bound on how often it could be is "
+              f"{high * 100:.1f}%.")
+        if stats["best_gross"] < stats["fee_hurdle"]:
+            print("\n  And the reason is not the fees. The best GROSS spread")
+            print(f"  observed was {stats['best_gross'] * 10000:.2f} bp: the "
+                  f"venues agree on the price to")
+            print("  within a fraction of a basis point. There is no")
+            print("  dislocation here to capture, so no fee tier and no")
+            print("  faster connection would change the answer -- the thing")
+            print("  the strategy is supposed to exploit does not exist at")
+            print("  this size on these venues.")
+        else:
+            print("\n  The gross spread does exceed the fee hurdle at its best,")
+            print("  so a cheaper fee tier is the one thing that could matter.")
     elif stats["median"] > 0:
         print("  CANDIDATE. The median capture is positive after fees, which")
         print("  is the first spot result in this project that is. It is not")
