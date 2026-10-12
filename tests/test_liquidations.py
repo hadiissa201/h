@@ -248,3 +248,47 @@ def test_only_one_topic_is_subscribed_so_an_invalid_one_cannot_poison_it():
 def test_a_pong_is_neither_data_nor_an_ack():
     from collect import classify_message
     assert classify_message("bybit", {"op": "pong"}) == "pong"
+
+
+# ------------------------- counting events, deliberately without prices
+def test_one_burst_counts_once_not_once_per_event():
+    """A sliding count would report a single spike fifty times over and fill
+    the sample with duplicates of one event."""
+    from rate import rolling_cascades
+    burst = [(float(i), 100_000.0) for i in range(4)]
+    assert rolling_cascades(burst, 250_000.0, 10.0) == 1
+
+
+def test_a_trickle_outside_the_window_is_not_a_cascade():
+    from rate import rolling_cascades
+    trickle = [(float(i * 60), 100_000.0) for i in range(10)]
+    assert rolling_cascades(trickle, 250_000.0, 10.0) == 0
+
+
+def test_two_separate_bursts_count_twice():
+    from rate import rolling_cascades
+    events = ([(float(i), 100_000.0) for i in range(3)]
+              + [(100.0 + i, 100_000.0) for i in range(3)])
+    assert rolling_cascades(events, 250_000.0, 10.0) == 2
+
+
+def test_a_lower_threshold_never_finds_fewer_cascades():
+    """Monotonic by construction. If it were not, the frequency table would be
+    nonsense and a threshold could be picked on an artefact."""
+    from rate import rolling_cascades
+    events = [(float(i), 30_000.0) for i in range(20)]
+    counts = [rolling_cascades(events, t, 10.0)
+              for t in (25_000.0, 50_000.0, 100_000.0, 250_000.0)]
+    assert counts == sorted(counts, reverse=True)
+
+
+def test_the_rate_script_cannot_compute_a_return():
+    """The separation between choosing a threshold on FREQUENCY and choosing
+    it on returns is enforced by the script lacking the capability, not by
+    remembering not to. It must never read a price."""
+    import inspect
+
+    import rate
+    source = inspect.getsource(rate)
+    assert "quotes" not in source
+    assert "bid" not in source and "ask" not in source
