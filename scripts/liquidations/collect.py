@@ -49,8 +49,27 @@ CASCADE_WINDOW_S = 10.0
 # Horizons are all reported, never chosen after the fact.
 HORIZONS_S = (30, 60, 300, 900)
 
-STREAM_URL = "wss://fstream.binance.com/stream?streams=!forceOrder@arr"
-BOOK_URL = "https://fapi.binance.com/fapi/v1/ticker/bookTicker"
+# Liquidations exist only on futures, and futures access is region-gated in a
+# way spot is not. The first cross-exchange run showed this plainly and it was
+# missed: api.binance.com answered while fapi.binance.com did not. So the
+# venue is a choice, with a reachability check before the stream opens rather
+# than forty minutes of silence that looks like a quiet market.
+VENUES = {
+    "binance": {
+        "stream": "wss://fstream.binance.com/ws/!forceOrder@arr",
+        "book": "https://fapi.binance.com/fapi/v1/ticker/bookTicker",
+        "probe": "https://fapi.binance.com/fapi/v1/ping",
+        "subscribe": None,
+    },
+    "bybit": {
+        "stream": "wss://stream.bybit.com/v5/public/linear",
+        "book": "https://api.bybit.com/v5/market/tickers",
+        "probe": "https://api.bybit.com/v5/market/time",
+        # Bybit renamed this topic; subscribing to both and parsing whichever
+        # arrives is cheaper than guessing which one this account sees.
+        "subscribe": ["allLiquidation", "liquidation"],
+    },
+}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS liquidations (
@@ -144,6 +163,76 @@ def parse_force_order(payload: dict) -> dict | None:
     }
 
 
+def parse_bybit_liquidation(payload: dict) -> list[dict]:
+    """Bybit's liquidation topic. Returns a list: one message can carry many.
+
+    Bybit reports the side of the position that was liquidated, which is the
+    opposite convention to Binance's order side. 'Buy' here means a LONG was
+    liquidated, i.e. forced SELLING, so it is normalised to Binance's
+    convention on the way in -- one sign error would invert every return in
+    the study and look like a finding.
+    """
+    topic = str(payload.get("topic") or "")
+    if "liquidation" not in topic.lower():
+        return []
+    rows = payload.get("data") or []
+    if isinstance(rows, dict):
+        rows = [rows]
+    out = []
+    for row in rows:
+        try:
+            price = float(row["p"] if "p" in row else row["price"])
+            quantity = float(row["v"] if "v" in row else row["size"])
+            symbol = str(row["s"] if "s" in row else row["symbol"])
+            position_side = str(row["S"] if "S" in row else row["side"])
+            event_ms = float(row.get("T") or payload.get("ts") or 0.0)
+        except (KeyError, TypeError, ValueError):
+            continue
+        if price <= 0 or quantity <= 0 or not symbol or event_ms <= 0:
+            continue
+        # Normalise to Binance's meaning: the side of the closing ORDER.
+        order_side = "SELL" if position_side.upper().startswith("B") else "BUY"
+        out.append({
+            "symbol": symbol,
+            "side": order_side,
+            "price": price,
+            "quantity": quantity,
+            "notional_usd": price * quantity,
+            "event_ts": event_ms / 1000.0,
+            "received_ts": time.time(),
+        })
+    return out
+
+
+def extract_liquidations(venue: str, payload: dict) -> list[dict]:
+    """Every liquidation in one message, whichever venue sent it."""
+    if venue == "bybit":
+        return parse_bybit_liquidation(payload)
+    row = parse_force_order(payload)
+    return [row] if row else []
+
+
+async def probe_venue(venue: str) -> tuple[bool, str]:
+    """Can this venue's FUTURES endpoint be reached at all?
+
+    Checked before the stream opens. Without it, a region-blocked futures API
+    looks exactly like a quiet market: the first live run printed "stream
+    quiet for 120s" for forty minutes while the real answer was that
+    fapi.binance.com does not resolve from there -- a fact already visible in
+    an earlier run's output and not acted on.
+    """
+    import httpx
+    url = VENUES[venue]["probe"]
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, timeout=15.0)
+        if resp.status_code >= 400:
+            return False, f"HTTP {resp.status_code} from {url}"
+        return True, "reachable"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {exc}"
+
+
 def update_burst(burst: Burst | None, liq: dict, window_s: float) -> Burst:
     """Add a liquidation to the running burst, restarting it when stale.
 
@@ -177,12 +266,24 @@ def trade_direction(side: str) -> str:
     return "BUY" if side.upper() == "SELL" else "SELL"
 
 
-async def fetch_quote(client, symbol: str) -> dict | None:  # noqa: ANN001
+async def fetch_quote(client, venue: str, symbol: str) -> dict | None:  # noqa: ANN001
+    """Best bid and ask now. The spread is MEASURED, never assumed.
+
+    A cascade is exactly when liquidity is worst, so assuming a normal spread
+    would be the most flattering error available -- the same shape as pricing
+    a memecoin from virtual reserves while the payout came from real ones.
+    """
+    url = VENUES[venue]["book"]
+    params = ({"category": "linear", "symbol": symbol} if venue == "bybit"
+              else {"symbol": symbol})
     try:
-        resp = await client.get(BOOK_URL, params={"symbol": symbol},
-                                timeout=10.0)
+        resp = await client.get(url, params=params, timeout=10.0)
         body = resp.json()
-        bid, ask = float(body["bidPrice"]), float(body["askPrice"])
+        if venue == "bybit":
+            row = ((body.get("result") or {}).get("list") or [{}])[0]
+            bid, ask = float(row["bid1Price"]), float(row["ask1Price"])
+        else:
+            bid, ask = float(body["bidPrice"]), float(body["askPrice"])
         if bid <= 0 or ask <= 0:
             return None
         return {"bid": bid, "ask": ask, "quoted_ts": time.time()}
@@ -191,13 +292,13 @@ async def fetch_quote(client, symbol: str) -> dict | None:  # noqa: ANN001
 
 
 async def follow_up(conn: sqlite3.Connection, client, cascade_id: int,  # noqa: ANN001
-                    symbol: str, detected_ts: float) -> None:
+                    venue: str, symbol: str, detected_ts: float) -> None:
     """Record the entry quote and each horizon quote for one cascade."""
     for offset in (0.0, *HORIZONS_S):
         wait = detected_ts + offset - time.time()
         if wait > 0:
             await asyncio.sleep(wait)
-        quote = await fetch_quote(client, symbol)
+        quote = await fetch_quote(client, venue, symbol)
         if quote is None:
             continue
         conn.execute(
@@ -208,85 +309,121 @@ async def follow_up(conn: sqlite3.Connection, client, cascade_id: int,  # noqa: 
         conn.commit()
 
 
-async def run(conn: sqlite3.Connection, symbols: set[str],
-              hours: float, min_usd: float, window_s: float) -> int:
+async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
+              hours: float, min_usd: float, window_s: float,
+              heartbeat_s: float = 120.0) -> int:
     import httpx
     import websockets
+
+    ok, note = await probe_venue(venue)
+    print(f"{venue} futures: {note}")
+    if not ok:
+        print("\n  That endpoint cannot be reached, so no liquidation will")
+        print("  ever arrive. Liquidations exist only on FUTURES, and futures")
+        print("  access is region-gated in a way spot is not -- an earlier")
+        print("  run on this machine reached api.binance.com while")
+        print("  fapi.binance.com failed, which is this same fact.")
+        other = "bybit" if venue == "binance" else "binance"
+        print("\n  Try the other venue:")
+        print(f"    python scripts/liquidations/collect.py --venue {other}")
+        return 1
 
     deadline = time.time() + hours * 3600 if hours > 0 else float("inf")
     bursts: dict[tuple[str, str], Burst] = {}
     recorded = cascades = 0
+    messages = 0
+    last_beat = time.time()
     tasks: set[asyncio.Task] = set()
 
-    print(f"streaming liquidations, cascade = ${min_usd:,.0f} in "
-          f"{window_s:.0f}s")
+    print(f"streaming liquidations, cascade = ${min_usd:,.0f} in {window_s:.0f}s")
     print(f"symbols: {', '.join(sorted(symbols)) if symbols else 'ALL'}")
     print(f"horizons: {', '.join(str(h) + 's' for h in HORIZONS_S)}\n")
 
     async with httpx.AsyncClient() as client:
         while time.time() < deadline:
             try:
-                async with websockets.connect(STREAM_URL,
+                async with websockets.connect(VENUES[venue]["stream"],
                                               ping_interval=20) as ws:
+                    topics = VENUES[venue]["subscribe"]
+                    if topics:
+                        args = [f"{t}.{sym}" for t in topics
+                                for sym in (symbols or {"BTCUSDT"})]
+                        await ws.send(json.dumps({"op": "subscribe",
+                                                  "args": args}))
+                        print(f"  subscribed: {', '.join(args)}")
                     while time.time() < deadline:
-                        raw = await asyncio.wait_for(ws.recv(), timeout=120)
+                        try:
+                            raw = await asyncio.wait_for(ws.recv(), timeout=30)
+                        except asyncio.TimeoutError:
+                            raw = None
+                        now = time.time()
+                        if now - last_beat >= heartbeat_s:
+                            # A count distinguishes a quiet market from a dead
+                            # socket. "stream quiet" alone did not, and forty
+                            # minutes went by looking like the former.
+                            print(f"  [{time.strftime('%H:%M:%S')}] "
+                                  f"{messages} messages, {recorded} "
+                                  f"liquidations, {cascades} cascades")
+                            if messages == 0:
+                                print("    Nothing at all has arrived. The")
+                                print("    socket is open but silent, which is")
+                                print("    a subscription or access problem,")
+                                print("    not a calm market.")
+                            last_beat = now
+                        if raw is None:
+                            continue
                         try:
                             payload = json.loads(raw)
                         except ValueError:
                             continue
-                        liq = parse_force_order(payload)
-                        if liq is None:
-                            continue
-                        if symbols and liq["symbol"] not in symbols:
-                            continue
+                        messages += 1
+                        for liq in extract_liquidations(venue, payload):
+                            if symbols and liq["symbol"] not in symbols:
+                                continue
+                            conn.execute(
+                                "INSERT OR IGNORE INTO liquidations (symbol,"
+                                " side, price, quantity, notional_usd,"
+                                " event_ts, received_ts) VALUES (?,?,?,?,?,?,?)",
+                                (liq["symbol"], liq["side"], liq["price"],
+                                 liq["quantity"], liq["notional_usd"],
+                                 liq["event_ts"], liq["received_ts"]))
+                            conn.commit()
+                            recorded += 1
 
-                        conn.execute(
-                            "INSERT OR IGNORE INTO liquidations (symbol, side,"
-                            " price, quantity, notional_usd, event_ts,"
-                            " received_ts) VALUES (?,?,?,?,?,?,?)",
-                            (liq["symbol"], liq["side"], liq["price"],
-                             liq["quantity"], liq["notional_usd"],
-                             liq["event_ts"], liq["received_ts"]))
-                        conn.commit()
-                        recorded += 1
+                            key = (liq["symbol"], liq["side"])
+                            burst = update_burst(bursts.get(key), liq, window_s)
+                            bursts[key] = burst
+                            if not is_cascade(burst, min_usd):
+                                continue
 
-                        key = (liq["symbol"], liq["side"])
-                        burst = update_burst(bursts.get(key), liq, window_s)
-                        bursts[key] = burst
-                        if not is_cascade(burst, min_usd):
-                            if recorded % 50 == 0:
-                                print(f"  {recorded} liquidations, "
-                                      f"{cascades} cascades")
-                            continue
-
-                        detected = time.time()
-                        cursor = conn.execute(
-                            "INSERT INTO cascades (symbol, side, total_usd,"
-                            " events, first_event_ts, last_event_ts,"
-                            " detected_ts, min_cascade_usd, window_s)"
-                            " VALUES (?,?,?,?,?,?,?,?,?)",
-                            (burst.symbol, burst.side, burst.total_usd,
-                             burst.events, burst.first_ts, burst.last_ts,
-                             detected, min_usd, window_s))
-                        conn.commit()
-                        cascades += 1
-                        latency = detected - burst.last_ts
-                        print(f"  CASCADE {cascades}: {burst.symbol} "
-                              f"${burst.total_usd:,.0f} forced "
-                              f"{'selling' if burst.side == 'SELL' else 'buying'}"
-                              f" over {burst.events} orders, "
-                              f"trade {trade_direction(burst.side)}, "
-                              f"latency {latency:.2f}s")
-                        task = asyncio.create_task(
-                            follow_up(conn, client, cursor.lastrowid,
-                                      burst.symbol, detected))
-                        tasks.add(task)
-                        task.add_done_callback(tasks.discard)
-                        bursts.pop(key, None)
-            except asyncio.TimeoutError:
-                print("  stream quiet for 120s, reconnecting")
+                            detected = time.time()
+                            cursor = conn.execute(
+                                "INSERT INTO cascades (symbol, side,"
+                                " total_usd, events, first_event_ts,"
+                                " last_event_ts, detected_ts,"
+                                " min_cascade_usd, window_s)"
+                                " VALUES (?,?,?,?,?,?,?,?,?)",
+                                (burst.symbol, burst.side, burst.total_usd,
+                                 burst.events, burst.first_ts, burst.last_ts,
+                                 detected, min_usd, window_s))
+                            conn.commit()
+                            cascades += 1
+                            forced = ("selling" if burst.side == "SELL"
+                                      else "buying")
+                            print(f"  CASCADE {cascades}: {burst.symbol} "
+                                  f"${burst.total_usd:,.0f} forced {forced} "
+                                  f"over {burst.events} orders, trade "
+                                  f"{trade_direction(burst.side)}, latency "
+                                  f"{detected - burst.last_ts:.2f}s")
+                            task = asyncio.create_task(
+                                follow_up(conn, client, cursor.lastrowid,
+                                          venue, burst.symbol, detected))
+                            tasks.add(task)
+                            task.add_done_callback(tasks.discard)
+                            bursts.pop(key, None)
             except Exception as exc:  # noqa: BLE001
-                print(f"  stream error, reconnecting: {type(exc).__name__}: {exc}")
+                print(f"  stream error, reconnecting: "
+                      f"{type(exc).__name__}: {exc}")
                 await asyncio.sleep(5)
 
         for task in list(tasks):
@@ -300,6 +437,10 @@ async def run(conn: sqlite3.Connection, symbols: set[str],
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--db", default="data/liquidations.sqlite")
+    parser.add_argument("--venue", choices=sorted(VENUES), default="bybit",
+                        help="bybit by default: Binance futures is "
+                             "region-blocked on the machine this was built "
+                             "for, and liquidations exist only on futures")
     parser.add_argument("--symbols", nargs="*",
                         default=["BTCUSDT", "ETHUSDT", "SOLUSDT"],
                         help="empty for every symbol Binance streams")
@@ -324,7 +465,7 @@ def main() -> int:
 
     async def main_async() -> int:
         asyncio.get_running_loop().set_exception_handler(quiet)
-        return await run(conn, set(args.symbols), args.hours,
+        return await run(conn, args.venue, set(args.symbols), args.hours,
                          args.min_cascade_usd, args.window)
 
     try:

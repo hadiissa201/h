@@ -139,3 +139,69 @@ def test_the_constants_are_the_pre_registered_ones():
 
 def test_every_horizon_is_collected_so_none_can_be_chosen_afterwards():
     assert HORIZONS_S == (30, 60, 300, 900)
+
+
+# ------------------------- the venue, because futures access is region-gated
+def test_bybit_side_is_normalised_to_binance_meaning():
+    """Bybit reports the side of the liquidated POSITION; Binance reports the
+    side of the closing ORDER. A liquidated long is Bybit 'Buy' and Binance
+    'SELL'. Not normalising would invert every return from one venue and the
+    sign would look like a finding."""
+    from collect import parse_bybit_liquidation
+    rows = parse_bybit_liquidation({
+        "topic": "allLiquidation.BTCUSDT",
+        "ts": 1760000000000,
+        "data": [{"s": "BTCUSDT", "S": "Buy", "p": "60000", "v": "2",
+                  "T": 1760000000000}]})
+    assert len(rows) == 1
+    assert rows[0]["side"] == "SELL"
+    assert trade_direction(rows[0]["side"]) == "BUY"
+
+
+def test_a_bybit_short_liquidation_is_forced_buying():
+    from collect import parse_bybit_liquidation
+    rows = parse_bybit_liquidation({
+        "topic": "liquidation.BTCUSDT", "ts": 1760000000000,
+        "data": {"s": "BTCUSDT", "S": "Sell", "p": "60000", "v": "1",
+                 "T": 1760000000000}})
+    assert rows[0]["side"] == "BUY"
+    assert trade_direction(rows[0]["side"]) == "SELL"
+
+
+def test_one_bybit_message_can_carry_several_liquidations():
+    from collect import parse_bybit_liquidation
+    rows = parse_bybit_liquidation({
+        "topic": "allLiquidation.BTCUSDT", "ts": 1760000000000,
+        "data": [{"s": "BTCUSDT", "S": "Buy", "p": "60000", "v": "1",
+                  "T": 1760000000000},
+                 {"s": "BTCUSDT", "S": "Buy", "p": "59900", "v": "3",
+                  "T": 1760000000001}]})
+    assert len(rows) == 2
+    assert sum(r["notional_usd"] for r in rows) == 60000 + 59900 * 3
+
+
+def test_a_non_liquidation_topic_yields_nothing():
+    from collect import parse_bybit_liquidation
+    assert parse_bybit_liquidation({"topic": "tickers.BTCUSDT",
+                                    "data": [{"s": "BTCUSDT"}]}) == []
+
+
+def test_both_venues_go_through_one_extractor():
+    """So the burst logic never has to know which venue it is reading."""
+    from collect import extract_liquidations
+    binance = {"data": {"o": {"s": "BTCUSDT", "S": "SELL", "ap": "100",
+                              "q": "1", "T": 1760000000000}}}
+    bybit = {"topic": "allLiquidation.BTCUSDT", "ts": 1760000000000,
+             "data": [{"s": "BTCUSDT", "S": "Buy", "p": "100", "v": "1",
+                       "T": 1760000000000}]}
+    assert extract_liquidations("binance", binance)[0]["side"] == "SELL"
+    assert extract_liquidations("bybit", bybit)[0]["side"] == "SELL"
+
+
+def test_bybit_is_the_default_venue():
+    """Binance futures is region-blocked on the machine this runs on, which an
+    earlier run showed by reaching api.binance.com while fapi failed."""
+    import collect
+    import inspect
+    source = inspect.getsource(collect.main)
+    assert 'default="bybit"' in source
