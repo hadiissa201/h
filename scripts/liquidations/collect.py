@@ -65,9 +65,12 @@ VENUES = {
         "stream": "wss://stream.bybit.com/v5/public/linear",
         "book": "https://api.bybit.com/v5/market/tickers",
         "probe": "https://api.bybit.com/v5/market/time",
-        # Bybit renamed this topic; subscribing to both and parsing whichever
-        # arrives is cheaper than guessing which one this account sees.
-        "subscribe": ["allLiquidation", "liquidation"],
+        # ONE topic. Subscribing to both names was meant to hedge against
+        # the rename; instead Bybit can reject the whole batch when any
+        # topic in it is invalid, so the hedge may have cost the valid
+        # subscription. Eight hours produced seven messages, every one an
+        # acknowledgement and none of them data.
+        "subscribe": ["allLiquidation"],
     },
 }
 
@@ -204,6 +207,42 @@ def parse_bybit_liquidation(payload: dict) -> list[dict]:
     return out
 
 
+def classify_message(venue: str, payload: dict) -> str:
+    """ack, data, pong, or unknown.
+
+    Counting messages without classifying them is what made eight hours look
+    like a quiet market. Seven messages all saying "subscribed" is not the
+    same as seven liquidations, and the heartbeat could not tell them apart.
+    """
+    if venue == "bybit":
+        op = str(payload.get("op") or "")
+        if op == "subscribe":
+            return "ack" if payload.get("success") else "ack_failed"
+        if op in {"pong", "ping"}:
+            return "pong"
+        if payload.get("topic"):
+            return "data"
+        return "unknown"
+    if payload.get("result") is None and "id" in payload:
+        return "ack"
+    return "data" if (payload.get("data") or payload.get("o")) else "unknown"
+
+
+def subscription_problem(venue: str, payload: dict) -> str | None:
+    """Bybit's own words when it refuses a subscription, or None.
+
+    The collector printed "subscribed:" after SENDING the request, without
+    reading the reply. A rejected subscription then looked exactly like a
+    market with no liquidations in it.
+    """
+    if venue != "bybit" or str(payload.get("op") or "") != "subscribe":
+        return None
+    if payload.get("success"):
+        return None
+    return str(payload.get("ret_msg") or payload.get("retMsg")
+               or "subscription refused, no reason given")
+
+
 def extract_liquidations(venue: str, payload: dict) -> list[dict]:
     """Every liquidation in one message, whichever venue sent it."""
     if venue == "bybit":
@@ -311,7 +350,7 @@ async def follow_up(conn: sqlite3.Connection, client, cascade_id: int,  # noqa: 
 
 async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
               hours: float, min_usd: float, window_s: float,
-              heartbeat_s: float = 120.0) -> int:
+              heartbeat_s: float = 120.0, show_raw: int = 3) -> int:
     import httpx
     import websockets
 
@@ -332,6 +371,8 @@ async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
     bursts: dict[tuple[str, str], Burst] = {}
     recorded = cascades = 0
     messages = 0
+    kinds: dict[str, int] = {}
+    shown = 0
     last_beat = time.time()
     tasks: set[asyncio.Task] = set()
 
@@ -350,7 +391,7 @@ async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
                                 for sym in (symbols or {"BTCUSDT"})]
                         await ws.send(json.dumps({"op": "subscribe",
                                                   "args": args}))
-                        print(f"  subscribed: {', '.join(args)}")
+                        print(f"  subscribe sent: {', '.join(args)}")
                     while time.time() < deadline:
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=30)
@@ -361,14 +402,20 @@ async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
                             # A count distinguishes a quiet market from a dead
                             # socket. "stream quiet" alone did not, and forty
                             # minutes went by looking like the former.
+                            breakdown = ", ".join(
+                                f"{k}={v}" for k, v in sorted(kinds.items()))
                             print(f"  [{time.strftime('%H:%M:%S')}] "
-                                  f"{messages} messages, {recorded} "
-                                  f"liquidations, {cascades} cascades")
-                            if messages == 0:
-                                print("    Nothing at all has arrived. The")
-                                print("    socket is open but silent, which is")
-                                print("    a subscription or access problem,")
-                                print("    not a calm market.")
+                                  f"{messages} messages ({breakdown or 'none'}), "
+                                  f"{recorded} liquidations, "
+                                  f"{cascades} cascades")
+                            if kinds.get("data", 0) == 0:
+                                print("    NO MARKET DATA has arrived, only")
+                                print("    protocol messages. That is a")
+                                print("    subscription problem, not a calm")
+                                print("    market -- a total count alone could")
+                                print("    not tell those apart and eight")
+                                print("    hours went by looking like the")
+                                print("    second.")
                             last_beat = now
                         if raw is None:
                             continue
@@ -377,6 +424,28 @@ async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
                         except ValueError:
                             continue
                         messages += 1
+                        kind = classify_message(venue, payload)
+                        kinds[kind] = kinds.get(kind, 0) + 1
+
+                        problem = subscription_problem(venue, payload)
+                        if problem:
+                            print(f"  SUBSCRIPTION REFUSED: {problem}")
+                            print("    Nothing will arrive on this topic. The")
+                            print("    collector used to print 'subscribed'")
+                            print("    after SENDING the request without")
+                            print("    reading the reply, so a refusal looked")
+                            print("    exactly like a market with no")
+                            print("    liquidations in it.")
+                        elif kind == "ack":
+                            print("  subscription confirmed by the venue")
+
+                        if shown < show_raw and kind in {"unknown", "data"}:
+                            # The first few raw messages, because eight hours
+                            # of counting messages never revealed that every
+                            # one of them was an acknowledgement.
+                            shown += 1
+                            print(f"  raw[{kind}]: {raw[:220]}")
+
                         for liq in extract_liquidations(venue, payload):
                             if symbols and liq["symbol"] not in symbols:
                                 continue

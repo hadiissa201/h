@@ -205,3 +205,46 @@ def test_bybit_is_the_default_venue():
     import inspect
     source = inspect.getsource(collect.main)
     assert 'default="bybit"' in source
+
+
+# ------------------- a message count that cannot tell data from protocol
+def test_a_subscription_acknowledgement_is_not_data():
+    """Eight hours produced seven messages and zero liquidations. Every one
+    was an ack. A total count could not tell that from a calm market."""
+    from collect import classify_message
+    assert classify_message("bybit", {"op": "subscribe", "success": True}) == "ack"
+    assert classify_message("bybit", {"topic": "allLiquidation.BTCUSDT",
+                                      "data": []}) == "data"
+
+
+def test_a_refused_subscription_is_detected_and_quoted():
+    """The collector printed "subscribed" after SENDING the request, never
+    reading the reply, so a refusal looked like an empty market."""
+    from collect import subscription_problem
+    assert subscription_problem("bybit", {"op": "subscribe", "success": False,
+                                          "ret_msg": "Invalid topic"}) == "Invalid topic"
+
+
+def test_a_successful_subscription_reports_no_problem():
+    from collect import subscription_problem
+    assert subscription_problem("bybit", {"op": "subscribe",
+                                          "success": True}) is None
+
+
+def test_a_refusal_with_no_reason_still_reports_a_problem():
+    from collect import subscription_problem
+    assert subscription_problem("bybit", {"op": "subscribe",
+                                          "success": False}) is not None
+
+
+def test_only_one_topic_is_subscribed_so_an_invalid_one_cannot_poison_it():
+    """Subscribing to both topic names was meant to hedge the rename. Bybit
+    can reject a whole batch containing any invalid topic, so the hedge may
+    have cost the valid subscription."""
+    from collect import VENUES
+    assert VENUES["bybit"]["subscribe"] == ["allLiquidation"]
+
+
+def test_a_pong_is_neither_data_nor_an_ack():
+    from collect import classify_message
+    assert classify_message("bybit", {"op": "pong"}) == "pong"
