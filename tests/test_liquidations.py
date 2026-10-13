@@ -323,3 +323,43 @@ def test_the_outage_threshold_is_far_above_the_observed_quiet_period():
     unlikely, so the cut is safely above normal quiet."""
     from rate import OUTAGE_GAP_S
     assert OUTAGE_GAP_S >= 1_800.0
+
+
+def test_the_collector_records_its_own_sessions():
+    """Uptime inferred from gaps was a heuristic that moves the rate 4x when
+    wrong. A recorded connect/disconnect is a fact, so the collector writes
+    one and rate.py prefers it."""
+    from collect import SCHEMA
+    assert "CREATE TABLE IF NOT EXISTS sessions" in SCHEMA
+    assert "connected_ts" in SCHEMA and "disconnected_ts" in SCHEMA
+
+
+def test_rate_prefers_the_session_log_over_the_gap_heuristic():
+    import inspect
+
+    import rate
+    source = inspect.getsource(rate.main)
+    assert "FROM sessions" in source
+    assert "session log" in source
+
+
+def test_the_reconnect_backoff_is_jittered():
+    """A fixed delay retries in lockstep with whatever broke and hammers a
+    resolver that has just failed -- the same thundering-herd problem the
+    memecoin scheduler had to fix."""
+    import inspect
+
+    import collect
+    source = inspect.getsource(collect.run)
+    assert "random.random()" in source
+    assert "backoff" in source
+
+
+def test_the_handshake_timeout_is_raised_above_the_default():
+    """Eight consecutive 'timed out during opening handshake'. The library
+    default of 10s is tight when DNS has just recovered and the route is
+    still settling."""
+    import inspect
+
+    import collect
+    assert "open_timeout=45" in inspect.getsource(collect.run)

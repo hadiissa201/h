@@ -36,6 +36,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import random
 import sqlite3
 import sys
 import time
@@ -102,6 +103,14 @@ CREATE TABLE IF NOT EXISTS cascades (
     window_s REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_cascade_symbol ON cascades(symbol, detected_ts);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    connected_ts REAL NOT NULL,
+    disconnected_ts REAL,
+    messages INTEGER DEFAULT 0,
+    reason TEXT
+);
 
 CREATE TABLE IF NOT EXISTS quotes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -305,7 +314,7 @@ def trade_direction(side: str) -> str:
     return "BUY" if side.upper() == "SELL" else "SELL"
 
 
-async def fetch_quote(client, venue: str, symbol: str) -> dict | None:  # noqa: ANN001
+async def fetch_quote(client, venue: str, symbol: str) -> dict | None:
     """Best bid and ask now. The spread is MEASURED, never assumed.
 
     A cascade is exactly when liquidity is worst, so assuming a normal spread
@@ -330,7 +339,7 @@ async def fetch_quote(client, venue: str, symbol: str) -> dict | None:  # noqa: 
         return None
 
 
-async def follow_up(conn: sqlite3.Connection, client, cascade_id: int,  # noqa: ANN001
+async def follow_up(conn: sqlite3.Connection, client, cascade_id: int,
                     venue: str, symbol: str, detected_ts: float) -> None:
     """Record the entry quote and each horizon quote for one cascade."""
     for offset in (0.0, *HORIZONS_S):
@@ -375,6 +384,8 @@ async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
     shown = 0
     last_beat = time.time()
     tasks: set[asyncio.Task] = set()
+    session_id: int | None = None
+    backoff = 5.0
 
     print(f"streaming liquidations, cascade = ${min_usd:,.0f} in {window_s:.0f}s")
     print(f"symbols: {', '.join(sorted(symbols)) if symbols else 'ALL'}")
@@ -383,8 +394,23 @@ async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
     async with httpx.AsyncClient() as client:
         while time.time() < deadline:
             try:
-                async with websockets.connect(VENUES[venue]["stream"],
-                                              ping_interval=20) as ws:
+                async with websockets.connect(
+                        VENUES[venue]["stream"],
+                        ping_interval=20,
+                        # 8 consecutive "timed out during opening handshake"
+                        # on a flaky link. The default 10s is tight when DNS
+                        # has just come back and the route is still settling.
+                        open_timeout=45,
+                        close_timeout=10) as ws:
+                    # Written down rather than inferred. rate.py had to guess
+                    # which silences were outages from gaps between
+                    # liquidations, and a guess in that direction changes the
+                    # measured rate by 4x.
+                    cursor = conn.execute(
+                        "INSERT INTO sessions (connected_ts) VALUES (?)",
+                        (time.time(),))
+                    conn.commit()
+                    session_id = cursor.lastrowid
                     topics = VENUES[venue]["subscribe"]
                     if topics:
                         args = [f"{t}.{sym}" for t in topics
@@ -491,9 +517,24 @@ async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
                             task.add_done_callback(tasks.discard)
                             bursts.pop(key, None)
             except Exception as exc:  # noqa: BLE001
+                if session_id is not None:
+                    conn.execute(
+                        "UPDATE sessions SET disconnected_ts = ?, "
+                        "messages = ?, reason = ? WHERE id = ?",
+                        (time.time(), messages, type(exc).__name__,
+                         session_id))
+                    conn.commit()
+                    session_id = None
                 print(f"  stream error, reconnecting: "
                       f"{type(exc).__name__}: {exc}")
-                await asyncio.sleep(5)
+                # Jittered, for the reason the memecoin scheduler needed it:
+                # a fixed delay retries in lockstep with whatever broke, and
+                # hammers a resolver that has just failed.
+                delay = min(60.0, backoff)
+                backoff = min(60.0, backoff * 1.7)
+                await asyncio.sleep(delay * (0.7 + random.random() * 0.6))
+            else:
+                backoff = 5.0
 
         for task in list(tasks):
             with contextlib.suppress(Exception):
@@ -522,7 +563,7 @@ def main() -> int:
 
     conn = connect(Path(args.db))
 
-    def quiet(loop, context):  # noqa: ANN001, ARG001
+    def quiet(loop, context):
         """One line per library-internal failure, not a traceback.
 
         A dropped websocket raises inside the library's own callback, outside

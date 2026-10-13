@@ -106,8 +106,22 @@ def main() -> int:
         return 0
 
     span_s = rows[-1][2] - rows[0][2]
-    gaps = find_gaps([r[2] for r in rows])
-    gap_s = sum(later - earlier for earlier, later in gaps)
+
+    # Prefer the collector's own session log over inferring outages from gaps
+    # between liquidations. The inference changes the measured rate by 4x when
+    # it is wrong, so a recorded fact beats a heuristic wherever one exists.
+    measured = conn.execute(
+        "SELECT SUM(COALESCE(disconnected_ts, ?) - connected_ts)"
+        " FROM sessions WHERE connected_ts >= ?",
+        (rows[-1][2], rows[0][2])).fetchone()[0]
+    if measured and measured > 0:
+        gaps, gap_s = [], max(0.0, span_s - measured)
+        source = "measured from the collector's session log"
+    else:
+        gaps = find_gaps([r[2] for r in rows])
+        gap_s = sum(later - earlier for earlier, later in gaps)
+        source = (f"inferred from gaps over {OUTAGE_GAP_S / 60:.0f}min; run "
+                  f"the current collector to have it recorded instead")
     # Connected time, not elapsed time. See find_gaps.
     live_s = max(1.0, span_s - gap_s)
     hours = live_s / 3600.0
@@ -119,9 +133,8 @@ def main() -> int:
     print("=" * 70)
     print(f"  {len(rows):,} liquidations")
     print(f"  elapsed        {span_s / 3600.0:>8.2f} hours")
-    print(f"  lost to gaps   {gap_s / 3600.0:>8.2f} hours   "
-          f"({len(gaps)} gap{'s' if len(gaps) != 1 else ''} over "
-          f"{OUTAGE_GAP_S / 60:.0f}min)")
+    print(f"  lost to gaps   {gap_s / 3600.0:>8.2f} hours")
+    print(f"                 {source}")
     print(f"  CONNECTED      {hours:>8.2f} hours   <- the denominator")
     if span_s > 0:
         print(f"  uptime         {live_s / span_s * 100:>8.1f}%")
