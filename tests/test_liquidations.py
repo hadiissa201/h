@@ -292,3 +292,34 @@ def test_the_rate_script_cannot_compute_a_return():
     source = inspect.getsource(rate)
     assert "quotes" not in source
     assert "bid" not in source and "ask" not in source
+
+
+# ----------------------- the denominator is connected time, not elapsed time
+def test_a_long_outage_is_excluded_from_the_rate():
+    """The first 21-hour run contained a 17-hour hole where the websocket
+    could not reconnect. 176 liquidations over 22 elapsed hours reads as
+    8/hour; the truth while connected was 35/hour."""
+    from rate import find_gaps
+    ts = [0.0, 60.0, 120.0, 120.0 + 17 * 3600, 120.0 + 17 * 3600 + 60]
+    gaps = find_gaps(ts)
+    assert len(gaps) == 1
+    assert abs(sum(b - a for a, b in gaps) - 17 * 3600) < 1.0
+
+
+def test_a_steady_stream_has_no_gaps():
+    from rate import find_gaps
+    assert find_gaps([float(i * 60) for i in range(50)]) == []
+
+
+def test_a_short_quiet_stretch_is_not_called_an_outage():
+    """Calling a quiet stretch an outage would inflate the rate instead, which
+    is the same error pointing the other way."""
+    from rate import find_gaps
+    assert find_gaps([0.0, 600.0, 1200.0]) == []
+
+
+def test_the_outage_threshold_is_far_above_the_observed_quiet_period():
+    """At ~35 liquidations/hour, seeing none for 30 minutes is vanishingly
+    unlikely, so the cut is safely above normal quiet."""
+    from rate import OUTAGE_GAP_S
+    assert OUTAGE_GAP_S >= 1_800.0
