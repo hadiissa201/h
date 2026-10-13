@@ -37,6 +37,7 @@ import asyncio
 import contextlib
 import json
 import random
+import socket
 import sqlite3
 import sys
 import time
@@ -391,12 +392,23 @@ async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
     print(f"symbols: {', '.join(sorted(symbols)) if symbols else 'ALL'}")
     print(f"horizons: {', '.join(str(h) + 's' for h in HORIZONS_S)}\n")
 
-    async with httpx.AsyncClient() as client:
+    # Same reason as the websocket: force IPv4 for the quote fetches, since a
+    # follow-up quote that times out costs a horizon we cannot go back for.
+    transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
+    async with httpx.AsyncClient(transport=transport) as client:
         while time.time() < deadline:
             try:
                 async with websockets.connect(
                         VENUES[venue]["stream"],
                         ping_interval=20,
+                        # IPv4 only. stream.bybit.com is CloudFront and
+                        # returns eight AAAA records ahead of four A records,
+                        # so Python tries IPv6 first. On a network with
+                        # partial IPv6 those attempts go nowhere and the
+                        # symptom is "timed out during opening handshake" --
+                        # which is exactly what repeated eight times in a row
+                        # while DNS resolution was demonstrably fine.
+                        family=socket.AF_INET,
                         # 8 consecutive "timed out during opening handshake"
                         # on a flaky link. The default 10s is tight when DNS
                         # has just come back and the route is still settling.

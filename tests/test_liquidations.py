@@ -363,3 +363,27 @@ def test_the_handshake_timeout_is_raised_above_the_default():
 
     import collect
     assert "open_timeout=45" in inspect.getsource(collect.run)
+
+
+# --------------------------- IPv6 that goes nowhere looks like a slow venue
+def test_the_stream_forces_ipv4():
+    """stream.bybit.com is CloudFront and returns eight AAAA records ahead of
+    four A records. On a network with partial IPv6, Python tries those first
+    and the symptom is 'timed out during opening handshake' -- which repeated
+    eight times in a row while DNS resolution was demonstrably fine."""
+    import inspect
+    import socket
+
+    import collect
+    source = inspect.getsource(collect.run)
+    assert "family=socket.AF_INET" in source
+    assert collect.socket.AF_INET == socket.AF_INET
+
+
+def test_the_quote_fetches_force_ipv4_too():
+    """A follow-up quote that times out costs a horizon we cannot go back
+    for, so the same fix applies to the REST calls."""
+    import inspect
+
+    import collect
+    assert 'local_address="0.0.0.0"' in inspect.getsource(collect.run)
