@@ -387,3 +387,34 @@ def test_the_quote_fetches_force_ipv4_too():
 
     import collect
     assert 'local_address="0.0.0.0"' in inspect.getsource(collect.run)
+
+
+# ------------------- a sleeping machine is not a network fault
+def test_a_suspension_is_distinguished_from_a_network_failure():
+    """Both long gaps in the collected data began around 23:00 local: a
+    bedtime, not a flaky ISP. WinError 1225 and 121 are what the adapter
+    returns while coming back from sleep, and two rounds went into DNS and
+    IPv6 before the timestamps were read for what they were."""
+    import inspect
+
+    import collect
+    source = inspect.getsource(collect.run)
+    assert "MACHINE WAS ASLEEP" in source
+    assert "SUSPEND_GAP_S" in source
+
+
+def test_the_suspension_threshold_is_far_above_the_recv_timeout():
+    """One iteration awaits recv() with a 30s timeout, so it cannot
+    legitimately take five minutes. Anything beyond that means the process
+    stopped running rather than the market going quiet."""
+    from collect import SUSPEND_GAP_S
+    assert SUSPEND_GAP_S >= 300.0
+    assert SUSPEND_GAP_S > 30.0 * 5
+
+
+def test_suspensions_are_summarised_at_the_end_of_a_run():
+    import inspect
+
+    import collect
+    source = inspect.getsource(collect.run)
+    assert "the machine slept, which no" in source

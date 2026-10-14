@@ -50,6 +50,9 @@ MIN_CASCADE_USD = 250_000.0
 CASCADE_WINDOW_S = 10.0
 # Horizons are all reported, never chosen after the fact.
 HORIZONS_S = (30, 60, 300, 900)
+# One loop iteration awaits recv() with a 30s timeout. Anything beyond this
+# means the process stopped running, not that the market went quiet.
+SUSPEND_GAP_S = 300.0
 
 # Liquidations exist only on futures, and futures access is region-gated in a
 # way spot is not. The first cross-exchange run showed this plainly and it was
@@ -387,6 +390,8 @@ async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
     tasks: set[asyncio.Task] = set()
     session_id: int | None = None
     backoff = 5.0
+    last_tick = time.time()
+    suspensions: list[tuple[float, float]] = []
 
     print(f"streaming liquidations, cascade = ${min_usd:,.0f} in {window_s:.0f}s")
     print(f"symbols: {', '.join(sorted(symbols)) if symbols else 'ALL'}")
@@ -436,6 +441,29 @@ async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
                         except asyncio.TimeoutError:
                             raw = None
                         now = time.time()
+
+                        # A single loop iteration awaits recv() with a 30s
+                        # timeout, so it can never legitimately take hours.
+                        # When it does, this process was SUSPENDED: the
+                        # machine slept. Both long gaps in the collected data
+                        # began around 23:00 local, which is a bedtime, not a
+                        # flaky ISP -- and WinError 1225 and 121 are what the
+                        # adapter returns while coming back from sleep. Two
+                        # rounds went into DNS and IPv6 before the timestamps
+                        # were read for what they were.
+                        if now - last_tick > SUSPEND_GAP_S:
+                            slept = now - last_tick
+                            suspensions.append((last_tick, now))
+                            print(f"  MACHINE WAS ASLEEP for "
+                                  f"{slept / 3600.0:.2f} hours "
+                                  f"({time.strftime('%H:%M', time.localtime(last_tick))}"
+                                  f" to {time.strftime('%H:%M', time.localtime(now))})")
+                            print("    Not a network fault: one loop iteration")
+                            print("    cannot take that long, so the process")
+                            print("    was suspended. Stop the machine")
+                            print("    sleeping or the gaps continue.")
+                        last_tick = now
+
                         if now - last_beat >= heartbeat_s:
                             # A count distinguishes a quiet market from a dead
                             # socket. "stream quiet" alone did not, and forty
@@ -553,6 +581,12 @@ async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
                 await asyncio.wait_for(task, timeout=max(HORIZONS_S) + 30)
 
     print(f"\n{recorded} liquidations recorded, {cascades} cascades")
+    if suspensions:
+        total = sum(b - a for a, b in suspensions) / 3600.0
+        print(f"{len(suspensions)} suspension(s) totalling {total:.2f} hours "
+              f"-- the machine slept, which no")
+        print("reconnect logic can fix. Set power to never sleep while "
+              "plugged in.")
     return 0
 
 
