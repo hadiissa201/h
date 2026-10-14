@@ -461,3 +461,54 @@ def test_episodes_collapse_across_symbols_not_within_one():
 
     import rate
     assert "across all symbols" in inspect.getsource(rate.independent_episodes)
+
+
+# ------------------ a gap is data missing at a particular time of day
+def test_a_nightly_outage_shows_as_blind_hours():
+    """The collection machine has intermittent mains power, so outages recur
+    at whichever hours the supply fails. Liquidations follow the trading
+    sessions, so being blind at the same hours every day is a bias with a
+    direction rather than a smaller sample."""
+    import time as _time
+
+    from rate import coverage_by_hour
+
+    day = _time.mktime((2026, 10, 1, 0, 0, 0, 0, 0, -1))
+    # Connected all day except 02:00-05:00, on two consecutive days.
+    intervals = []
+    for d in range(2):
+        base = day + d * 86400
+        intervals.append((base, base + 2 * 3600))
+        intervals.append((base + 5 * 3600, base + 24 * 3600))
+    coverage = coverage_by_hour(intervals, (day, day + 2 * 86400))
+    assert coverage[3] < 0.1
+    assert coverage[12] > 0.9
+
+
+def test_a_quiet_market_is_not_mistaken_for_an_outage():
+    """The first version inferred coverage from gaps between liquidations, so
+    an hour with no liquidations read as blind. A quiet market is not an
+    outage, and overstating a bias is still getting it wrong."""
+    import time as _time
+
+    from rate import coverage_by_hour
+    day = _time.mktime((2026, 10, 1, 0, 0, 0, 0, 0, -1))
+    # Connected the whole time, regardless of how few liquidations arrived.
+    coverage = coverage_by_hour([(day, day + 86400)], (day, day + 86400))
+    assert min(coverage.values()) > 0.9
+
+
+def test_full_coverage_reports_no_blind_hours():
+    import time as _time
+
+    from rate import coverage_by_hour
+    day = _time.mktime((2026, 10, 1, 0, 0, 0, 0, 0, -1))
+    coverage = coverage_by_hour([(day, day + 86400)], (day, day + 86400))
+    assert coverage
+    assert min(coverage.values()) > 0.9
+
+
+def test_no_sessions_gives_no_coverage_rather_than_a_crash():
+    from rate import coverage_by_hour
+    assert coverage_by_hour([], (0.0, 100.0)) == {}
+    assert coverage_by_hour([(0.0, 10.0)], (100.0, 100.0)) == {}

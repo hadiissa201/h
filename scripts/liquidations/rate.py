@@ -92,6 +92,40 @@ def find_gaps(timestamps: list[float],
     return gaps
 
 
+def coverage_by_hour(intervals: list[tuple[float, float]],
+                     span: tuple[float, float]) -> dict[int, float]:
+    """Fraction of each hour of the day actually covered by a connection.
+
+    Takes CONNECTED intervals, not liquidation timestamps. The first version
+    inferred coverage from gaps between liquidations and reported every hour
+    as blind, because a quiet market can go longer than the outage threshold
+    without a single liquidation. That would have overstated the bias -- and
+    overstating a bias is still getting it wrong.
+
+    Why this matters at all: a gap is data missing at a particular TIME. The
+    collection machine has intermittent mains power, so outages recur in
+    whichever hours the supply fails, and liquidations follow the trading
+    sessions rather than spreading evenly. Being blind from 14:00 to 18:00
+    every day is not a smaller sample of the same thing, and no figure
+    computed from the returns would reveal it.
+    """
+    import time as _time
+    begin, finish = span
+    if finish <= begin or not intervals:
+        return {}
+    seen: dict[int, float] = dict.fromkeys(range(24), 0.0)
+    total: dict[int, float] = dict.fromkeys(range(24), 0.0)
+    step = 300.0
+    moment = begin
+    while moment < finish:
+        hour = _time.localtime(moment).tm_hour
+        total[hour] += step
+        if any(a <= moment <= b for a, b in intervals):
+            seen[hour] += step
+        moment += step
+    return {h: seen[h] / total[h] for h in range(24) if total[h] > 0}
+
+
 def independent_episodes(moments: list[float],
                          gap_s: float = EPISODE_GAP_S) -> int:
     """Cascades collapsed into episodes, across all symbols.
@@ -221,6 +255,32 @@ def main() -> int:
             print("  Latency rises during the bursts that matter, because")
             print("  that is when the stream is busiest. The plan's")
             print("  precondition is under 2s and this is close to it.")
+
+    session_rows = conn.execute(
+        "SELECT connected_ts, COALESCE(disconnected_ts, ?) FROM sessions",
+        (rows[-1][2],)).fetchall()
+    coverage = (coverage_by_hour([(a, b) for a, b in session_rows],
+                                 (rows[0][2], rows[-1][2]))
+                if session_rows else {})
+    if coverage and min(coverage.values()) < 0.9:
+        print("\n" + "=" * 70)
+        print("WHICH HOURS WE ARE BLIND IN")
+        print("=" * 70)
+        print("  A gap is data missing at a particular TIME, and liquidations")
+        print("  follow the trading sessions rather than spreading evenly.")
+        for hour in sorted(coverage):
+            pct = coverage[hour] * 100
+            bar = "#" * int(pct / 5)
+            flag = "  <- blind" if pct < 50 else ""
+            print(f"    {hour:02d}:00  {pct:>5.1f}%  {bar}{flag}")
+        worst = [h for h, v in coverage.items() if v < 0.5]
+        if worst:
+            print(f"\n  Under 50% coverage in {len(worst)} hour(s) of the day.")
+            print("  If the outages are mains power rather than the network,")
+            print("  they recur at the same hours and the sample is")
+            print("  systematically missing those sessions. That is a bias")
+            print("  with a direction, not just a smaller n, and no figure")
+            print("  computed from the returns would reveal it.")
 
     print("\n" + "=" * 70)
     print("WHAT THIS DOES AND DOES NOT LICENSE")
