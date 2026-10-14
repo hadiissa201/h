@@ -113,6 +113,55 @@ Or copy the database to your own machine and run it there:
 scp ubuntu@<public-ip>:~/h/data/liquidations.sqlite .
 ```
 
+## Oracle stops instances it considers idle
+
+Oracle reclaims Always Free compute it judges unused. Per [Oracle's
+docs](https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm),
+an instance is idle when, over a 7-day window, 95th-percentile CPU is under
+20%, network is under 20%, and (on A1 shapes) memory is under 20%.
+
+**This collector trips all three.** It holds one websocket and waits. CPU is
+near zero, the traffic is a few KB/s, and it uses a few dozen MB of RAM. Left
+alone it would be stopped around day 7 of a 20-day run -- and it would look
+exactly like the power cuts it was meant to escape.
+
+The instance is stopped, not deleted, and the disk survives, so restarting it
+loses no data. But the gap in collection is the thing that makes the sample
+unusable, so do not rely on noticing.
+
+`keepalive.py` holds CPU above the threshold with a duty-cycled loop. The
+instance genuinely is in continuous use; it is I/O-bound rather than
+CPU-bound, so this makes the utilisation metric reflect what is actually
+happening rather than disguise an unused machine.
+
+```bash
+sudo tee /etc/systemd/system/keepalive.service > /dev/null <<'EOF'
+[Unit]
+Description=Hold CPU above the Always Free idle threshold
+
+[Service]
+Type=simple
+User=ubuntu
+ExecStart=/home/ubuntu/h/.venv/bin/python /home/ubuntu/h/scripts/liquidations/keepalive.py
+Restart=always
+Nice=19
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now keepalive
+```
+
+`Nice=19` means it yields the CPU to the collector whenever the collector
+wants it, so it cannot cause a missed liquidation.
+
+If you would rather not run it: check the instance every few days and restart
+it when Oracle stops it. Oracle emails first. Converting to Pay As You Go also
+exempts the account, but that makes overages billable, so it is the wrong
+trade here.
+
 ## What to confirm after a day
 
 Run `rate.py` and check three things, in this order:
