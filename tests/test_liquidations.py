@@ -18,7 +18,6 @@ from collect import (
     CASCADE_WINDOW_S,
     HORIZONS_S,
     MIN_CASCADE_USD,
-    Burst,
     is_cascade,
     parse_force_order,
     trade_direction,
@@ -201,8 +200,9 @@ def test_both_venues_go_through_one_extractor():
 def test_bybit_is_the_default_venue():
     """Binance futures is region-blocked on the machine this runs on, which an
     earlier run showed by reaching api.binance.com while fapi failed."""
-    import collect
     import inspect
+
+    import collect
     source = inspect.getsource(collect.main)
     assert 'default="bybit"' in source
 
@@ -285,13 +285,23 @@ def test_a_lower_threshold_never_finds_fewer_cascades():
 def test_the_rate_script_cannot_compute_a_return():
     """The separation between choosing a threshold on FREQUENCY and choosing
     it on returns is enforced by the script lacking the capability, not by
-    remembering not to. It must never read a price."""
+    remembering not to. It must never read a price.
+
+    The first version of this test matched bare substrings and failed on the
+    word "asks" in a comment. A guard that trips on English prose is a bad
+    test even when its intent is right, so it now names the actual
+    capabilities: the quotes table and the venues' price columns.
+    """
     import inspect
 
     import rate
     source = inspect.getsource(rate)
-    assert "quotes" not in source
-    assert "bid" not in source and "ask" not in source
+    assert "FROM quotes" not in source
+    assert "bidPrice" not in source and "askPrice" not in source
+    assert "bid1Price" not in source and "ask1Price" not in source
+    # The only tables it may read.
+    assert source.count("FROM ") == source.count("FROM liquidations") \
+        + source.count("FROM cascades") + source.count("FROM sessions")
 
 
 # ----------------------- the denominator is connected time, not elapsed time
