@@ -39,6 +39,12 @@ CANDIDATE_THRESHOLDS = (25_000.0, 50_000.0, 100_000.0, 250_000.0, 500_000.0)
 # unlikely, so a gap this long is overwhelmingly an outage. Shorter gaps are
 # left in, because calling a quiet stretch an outage would inflate the rate.
 OUTAGE_GAP_S = 1_800.0
+# Cascades arrive in clusters. The first live burst produced three inside 140
+# seconds -- ETH, ETH, then BTC, all forced selling -- which is ONE market
+# move counted three times, not three independent observations. The plan asks
+# for 100 cascades; if they come in threes, that is 33 episodes and its power
+# calculation is wrong.
+EPISODE_GAP_S = 600.0
 # The pre-registration's requirement, restated so the arithmetic is visible.
 CASCADES_NEEDED = 100
 DAYS_NEEDED = 20
@@ -84,6 +90,25 @@ def find_gaps(timestamps: list[float],
         if later - earlier >= gap_s:
             gaps.append((earlier, later))
     return gaps
+
+
+def independent_episodes(moments: list[float],
+                         gap_s: float = EPISODE_GAP_S) -> int:
+    """Cascades collapsed into episodes, across all symbols.
+
+    Three cascades in one selloff are one event. Counting them separately
+    inflates the sample and narrows every interval computed from it, which is
+    the kind of error that makes a result look significant when it is not.
+    """
+    if not moments:
+        return 0
+    episodes = 1
+    previous = min(moments)
+    for moment in sorted(moments)[1:]:
+        if moment - previous > gap_s:
+            episodes += 1
+        previous = moment
+    return episodes
 
 
 def main() -> int:
@@ -168,6 +193,34 @@ def main() -> int:
         marker = "  <- pre-registered" if threshold == 250_000.0 else ""
         print(f"  ${threshold:>11,.0f}  {total:>8}  {per_day:>8.1f}  "
               f"{eta:>13}{marker}")
+
+    cascade_rows = conn.execute(
+        "SELECT detected_ts, last_event_ts FROM cascades"
+        " ORDER BY detected_ts").fetchall()
+    if cascade_rows:
+        moments = [r[0] for r in cascade_rows]
+        episodes = independent_episodes(moments)
+        latencies = sorted(r[0] - r[1] for r in cascade_rows)
+        print("\n" + "=" * 70)
+        print("CASCADES ACTUALLY RECORDED")
+        print("=" * 70)
+        print(f"  {len(cascade_rows)} cascades, but only {episodes} "
+              f"independent episode(s)")
+        print(f"  (collapsed within {EPISODE_GAP_S / 60:.0f} minutes across "
+              f"all symbols)")
+        if len(cascade_rows) > episodes:
+            print(f"\n  {len(cascade_rows) / episodes:.1f} cascades per "
+                  f"episode. The plan asks for 100")
+            print("  cascades; at this clustering that is roughly "
+                  f"{100 / (len(cascade_rows) / episodes):.0f} independent")
+            print("  events, and every interval computed from the larger")
+            print("  number would be too narrow.")
+        print(f"\n  detection latency: median {latencies[len(latencies) // 2]:.2f}s, "
+              f"worst {latencies[-1]:.2f}s")
+        if latencies[-1] > 1.5:
+            print("  Latency rises during the bursts that matter, because")
+            print("  that is when the stream is busiest. The plan's")
+            print("  precondition is under 2s and this is close to it.")
 
     print("\n" + "=" * 70)
     print("WHAT THIS DOES AND DOES NOT LICENSE")

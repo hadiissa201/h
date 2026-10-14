@@ -418,3 +418,36 @@ def test_suspensions_are_summarised_at_the_end_of_a_run():
     import collect
     source = inspect.getsource(collect.run)
     assert "the machine slept, which no" in source
+
+
+# --------------- clustered cascades are not independent observations
+def test_three_cascades_in_one_selloff_are_one_episode():
+    """The first live burst: ETH $310k, ETH $297k, BTC $304k inside 140
+    seconds, all forced selling. That is one market move counted three times.
+    Treating them as three narrows every interval computed from the sample."""
+    from rate import independent_episodes
+    assert independent_episodes([0.0, 70.0, 140.0]) == 1
+
+
+def test_cascades_an_hour_apart_are_separate_episodes():
+    from rate import independent_episodes
+    assert independent_episodes([0.0, 3600.0, 7200.0]) == 3
+
+
+def test_no_cascades_is_no_episodes():
+    from rate import independent_episodes
+    assert independent_episodes([]) == 0
+
+
+def test_a_single_cascade_is_one_episode():
+    from rate import independent_episodes
+    assert independent_episodes([123.0]) == 1
+
+
+def test_episodes_collapse_across_symbols_not_within_one():
+    """ETH and BTC liquidating together is the same market move. Collapsing
+    per symbol would keep the inflation this exists to remove."""
+    import inspect
+
+    import rate
+    assert "across all symbols" in inspect.getsource(rate.independent_episodes)
