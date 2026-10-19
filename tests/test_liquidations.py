@@ -512,3 +512,53 @@ def test_no_sessions_gives_no_coverage_rather_than_a_crash():
     from rate import coverage_by_hour
     assert coverage_by_hour([], (0.0, 100.0)) == {}
     assert coverage_by_hour([(0.0, 10.0)], (100.0, 100.0)) == {}
+
+
+def test_short_silence_is_not_called_a_fault():
+    """Two empty minutes happen ~1 run in 30 at the measured rate.
+
+    The guard this replaces asserted "subscription problem" at the first
+    heartbeat with no data, which is 2 minutes.
+    """
+    import collect
+    assert not collect.silence_is_suspicious(120.0)
+    assert not collect.silence_is_suspicious(600.0)
+
+
+def test_long_silence_is_called_a_fault():
+    """Hours of nothing is not a calm market at any plausible rate."""
+    import collect
+    assert collect.silence_is_suspicious(3600.0)
+    assert collect.silence_is_suspicious(8 * 3600.0)
+
+
+def test_silence_threshold_matches_the_stated_odds():
+    """The cutoff is where P(zero) crosses the alarm probability."""
+    import math
+
+    import collect
+    cutoff = -math.log(collect.SILENCE_ALARM_P) / collect.QUIET_RATE_PER_HOUR
+    assert not collect.silence_is_suspicious(cutoff * 3600.0 * 0.99)
+    assert collect.silence_is_suspicious(cutoff * 3600.0 * 1.01)
+
+
+def test_missing_ack_is_a_fault_immediately():
+    """No ack means nothing was ever subscribed; waiting proves nothing."""
+    import collect
+    lines = " ".join(collect.silence_verdict(5.0, acked=False))
+    assert "NO SUBSCRIPTION ACK" in lines
+
+
+def test_acked_short_silence_says_it_is_not_evidence():
+    import collect
+    lines = " ".join(collect.silence_verdict(120.0, acked=True))
+    assert "not yet evidence" in lines
+    assert "NO MARKET DATA" not in lines
+
+
+def test_acked_long_silence_overrides_the_ack():
+    """The 8-hour failure acked too; a confirmed ack must not buy silence."""
+    import collect
+    lines = " ".join(collect.silence_verdict(8 * 3600.0, acked=True))
+    assert "NO MARKET DATA" in lines
+    assert "despite the ack" in lines

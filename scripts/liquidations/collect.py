@@ -36,6 +36,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import math
 import random
 import socket
 import sqlite3
@@ -256,6 +257,53 @@ def subscription_problem(venue: str, payload: dict) -> str | None:
                or "subscription refused, no reason given")
 
 
+# A deliberately calm market, well below the 102.6/hour measured over the
+# first real session. Used only to ask how long silence must last before a
+# quiet market stops being a plausible explanation.
+QUIET_RATE_PER_HOUR = 10.0
+SILENCE_ALARM_P = 0.001
+
+
+def silence_is_suspicious(elapsed_s: float,
+                          rate_per_hour: float = QUIET_RATE_PER_HOUR,
+                          alarm_p: float = SILENCE_ALARM_P) -> bool:
+    """Is zero market data over this long too unlikely to be a calm market?
+
+    Liquidations arrive roughly as a Poisson process, so the chance of seeing
+    none in a window is exp(-rate * window). Silence is only evidence of a
+    broken subscription once that probability is small.
+
+    The guard this replaces asserted "that is a subscription problem" the
+    first time a heartbeat found no data, after two minutes. At the measured
+    rate two empty minutes happen about one run in thirty, so it was calling
+    a routine lull a fault -- the same confident-wrong shape as the eight
+    hours of acknowledgements it was written to catch, pointing the other way.
+    """
+    if elapsed_s <= 0 or rate_per_hour <= 0:
+        return False
+    expected = rate_per_hour * elapsed_s / 3600.0
+    return math.exp(-expected) < alarm_p
+
+
+def silence_verdict(elapsed_s: float, acked: bool) -> list[str]:
+    """What to say when a heartbeat finds no market data yet."""
+    minutes = elapsed_s / 60.0
+    if not acked:
+        return ["No market data and NO SUBSCRIPTION ACK.",
+                "Nothing confirmed the subscription, so",
+                "nothing is expected to arrive."]
+    if not silence_is_suspicious(elapsed_s):
+        return [f"No liquidations yet ({minutes:.0f}m). The venue",
+                "confirmed the subscription, and a lull this",
+                "short is unremarkable -- not yet evidence",
+                "of anything."]
+    return [f"NO MARKET DATA in {minutes:.0f}m, only protocol",
+            "messages. Too long to be a calm market at any",
+            f"plausible rate (under {QUIET_RATE_PER_HOUR:.0f}/hour the odds",
+            f"of this are below {SILENCE_ALARM_P:.1%}). Treat the",
+            "subscription as broken despite the ack."]
+
+
 def extract_liquidations(venue: str, payload: dict) -> list[dict]:
     """Every liquidation in one message, whichever venue sent it."""
     if venue == "bybit":
@@ -428,6 +476,9 @@ async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
                         (time.time(),))
                     conn.commit()
                     session_id = cursor.lastrowid
+                    # Silence is judged from when THIS stream opened, not from
+                    # process start: a reconnect restarts the clock.
+                    stream_started = time.time()
                     topics = VENUES[venue]["subscribe"]
                     if topics:
                         args = [f"{t}.{sym}" for t in topics
@@ -475,13 +526,10 @@ async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
                                   f"{recorded} liquidations, "
                                   f"{cascades} cascades")
                             if kinds.get("data", 0) == 0:
-                                print("    NO MARKET DATA has arrived, only")
-                                print("    protocol messages. That is a")
-                                print("    subscription problem, not a calm")
-                                print("    market -- a total count alone could")
-                                print("    not tell those apart and eight")
-                                print("    hours went by looking like the")
-                                print("    second.")
+                                for line in silence_verdict(
+                                        now - stream_started,
+                                        acked=kinds.get("ack", 0) > 0):
+                                    print(f"    {line}")
                             last_beat = now
                         if raw is None:
                             continue
