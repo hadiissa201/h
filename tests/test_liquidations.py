@@ -562,3 +562,39 @@ def test_acked_long_silence_overrides_the_ack():
     lines = " ".join(collect.silence_verdict(8 * 3600.0, acked=True))
     assert "NO MARKET DATA" in lines
     assert "despite the ack" in lines
+
+
+def test_control_trades_are_never_stored_as_liquidations():
+    """publicTrade proves the data path; it is not liquidation data."""
+    import collect
+
+    trade = {"topic": "publicTrade.BTCUSDT",
+             "data": [{"S": "Sell", "p": "60000", "v": "1.5",
+                       "T": 1700000000000, "s": "BTCUSDT"}]}
+    assert collect.extract_liquidations("bybit", trade) == []
+    assert collect.classify_message("bybit", trade) == "control"
+
+
+def test_liquidation_topic_still_classifies_as_data():
+    import collect
+
+    liq = {"topic": "allLiquidation.BTCUSDT", "data": []}
+    assert collect.classify_message("bybit", liq) == "data"
+
+
+def test_flowing_control_makes_silence_a_market_fact():
+    """The whole point: trades arriving proves nothing is broken."""
+    import collect
+
+    lines = " ".join(collect.silence_verdict(3600.0, acked=True,
+                                             control_msgs=9000))
+    assert "data path demonstrably works" in lines
+    assert "not a fault" in lines
+
+
+def test_dead_control_after_a_long_silence_is_still_a_fault():
+    import collect
+
+    lines = " ".join(collect.silence_verdict(3600.0, acked=True,
+                                             control_msgs=0))
+    assert "broken despite the ack" in lines

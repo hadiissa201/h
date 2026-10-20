@@ -77,8 +77,19 @@ VENUES = {
         # subscription. Eight hours produced seven messages, every one an
         # acknowledgement and none of them data.
         "subscribe": ["allLiquidation"],
+        # A high-rate CONTROL topic, subscribed separately and never stored.
+        # Liquidations are rare enough that "none yet" and "nothing is
+        # arriving" look identical, which has now cost this project forty
+        # minutes, eight hours, and a morning. Trades arrive constantly, so
+        # counting them answers "is market data reaching us at all" directly
+        # rather than by inference from silence.
+        "control": ["publicTrade"],
     },
 }
+
+# Topic prefixes whose messages prove the data path works and are then
+# discarded. Nothing from these is ever written to the database.
+CONTROL_TOPICS = {"publicTrade"}
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS liquidations (
@@ -234,7 +245,10 @@ def classify_message(venue: str, payload: dict) -> str:
             return "ack" if payload.get("success") else "ack_failed"
         if op in {"pong", "ping"}:
             return "pong"
-        if payload.get("topic"):
+        topic = str(payload.get("topic") or "")
+        if topic:
+            if topic.split(".")[0] in CONTROL_TOPICS:
+                return "control"
             return "data"
         return "unknown"
     if payload.get("result") is None and "id" in payload:
@@ -285,27 +299,44 @@ def silence_is_suspicious(elapsed_s: float,
     return math.exp(-expected) < alarm_p
 
 
-def silence_verdict(elapsed_s: float, acked: bool) -> list[str]:
-    """What to say when a heartbeat finds no market data yet."""
+def silence_verdict(elapsed_s: float, acked: bool,
+                    control_msgs: int = 0) -> list[str]:
+    """What to say when a heartbeat finds no liquidations yet.
+
+    control_msgs counts messages on the high-rate control topic. When those
+    are arriving, the socket, the subscription mechanism and the venue's
+    delivery are all demonstrated to work, so an absence of liquidations is a
+    fact about the market rather than a fault -- stated, not inferred.
+    """
     minutes = elapsed_s / 60.0
     if not acked:
         return ["No market data and NO SUBSCRIPTION ACK.",
                 "Nothing confirmed the subscription, so",
                 "nothing is expected to arrive."]
+    if control_msgs > 0:
+        return [f"No liquidations in {minutes:.0f}m, but {control_msgs} trade",
+                "messages arrived on the control topic, so",
+                "the data path demonstrably works. Nothing",
+                "is being liquidated. This is the market,",
+                "not a fault."]
     if not silence_is_suspicious(elapsed_s):
-        return [f"No liquidations yet ({minutes:.0f}m). The venue",
-                "confirmed the subscription, and a lull this",
-                "short is unremarkable -- not yet evidence",
-                "of anything."]
-    return [f"NO MARKET DATA in {minutes:.0f}m, only protocol",
-            "messages. Too long to be a calm market at any",
-            f"plausible rate (under {QUIET_RATE_PER_HOUR:.0f}/hour the odds",
-            f"of this are below {SILENCE_ALARM_P:.1%}). Treat the",
-            "subscription as broken despite the ack."]
+        return [f"No liquidations yet ({minutes:.0f}m), and no control",
+                "messages either. The venue confirmed the",
+                "subscription and a lull this short is",
+                "unremarkable -- not yet evidence of anything."]
+    return [f"NO MARKET DATA in {minutes:.0f}m, not even trades on",
+            "the control topic, which is never this quiet.",
+            f"Under {QUIET_RATE_PER_HOUR:.0f} liquidations/hour the odds of this",
+            f"are below {SILENCE_ALARM_P:.1%}. Treat the subscription as",
+            "broken despite the ack."]
 
 
 def extract_liquidations(venue: str, payload: dict) -> list[dict]:
     """Every liquidation in one message, whichever venue sent it."""
+    if str(payload.get("topic") or "").split(".")[0] in CONTROL_TOPICS:
+        # The control topic exists to prove the data path works. Its trades
+        # are not liquidations and must never reach the table.
+        return []
     if venue == "bybit":
         return parse_bybit_liquidation(payload)
     row = parse_force_order(payload)
@@ -486,6 +517,18 @@ async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
                         await ws.send(json.dumps({"op": "subscribe",
                                                   "args": args}))
                         print(f"  subscribe sent: {', '.join(args)}")
+                    control = VENUES[venue].get("control")
+                    if control:
+                        # A SEPARATE subscribe message, never batched with the
+                        # liquidation topics: Bybit can reject a whole batch
+                        # over one bad topic, and batching once already cost
+                        # the valid subscription. A rejection here must not be
+                        # able to take the real one down with it.
+                        cargs = [f"{t}.{sym}" for t in control
+                                 for sym in (symbols or {"BTCUSDT"})]
+                        await ws.send(json.dumps({"op": "subscribe",
+                                                  "args": cargs}))
+                        print(f"  control subscribe sent: {', '.join(cargs)}")
                     while time.time() < deadline:
                         try:
                             raw = await asyncio.wait_for(ws.recv(), timeout=30)
@@ -528,7 +571,8 @@ async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
                             if kinds.get("data", 0) == 0:
                                 for line in silence_verdict(
                                         now - stream_started,
-                                        acked=kinds.get("ack", 0) > 0):
+                                        acked=kinds.get("ack", 0) > 0,
+                                        control_msgs=kinds.get("control", 0)):
                                     print(f"    {line}")
                             last_beat = now
                         if raw is None:
