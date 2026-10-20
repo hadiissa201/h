@@ -78,6 +78,10 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/h
+# Without this Python buffers stdout when it is a file rather than a
+# terminal, so a process printing a few lines a minute writes nothing for a
+# long time and a working collector looks like a dead one.
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/home/ubuntu/h/.venv/bin/python scripts/liquidations/collect.py
 Restart=always
 RestartSec=10
