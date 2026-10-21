@@ -598,3 +598,96 @@ def test_dead_control_after_a_long_silence_is_still_a_fault():
     lines = " ".join(collect.silence_verdict(3600.0, acked=True,
                                              control_msgs=0))
     assert "broken despite the ack" in lines
+
+
+def test_control_sampler_writes_rows_with_no_cascade_id():
+    """The control arm is what separates a cascade effect from drift.
+
+    It went unimplemented while the schema documented it, so the column
+    existed and nothing ever filled it. Quotes cannot be backfilled: no
+    price history is stored, so an hour without this is an hour the control
+    arm does not exist for.
+    """
+    import asyncio
+    import sqlite3
+
+    import collect
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(collect.SCHEMA)
+
+    async def fake_fetch(client, venue, symbol):
+        return {"bid": 100.0, "ask": 100.1, "quoted_ts": 1.0}
+
+    real_fetch, real_horizons = collect.fetch_quote, collect.HORIZONS_S
+    collect.fetch_quote = fake_fetch
+    collect.HORIZONS_S = (0.01,)
+    try:
+        asyncio.run(collect.control_sampler(
+            conn, None, "bybit", {"BTCUSDT"},
+            deadline=time.time() + 0.3, per_hour=200_000.0))
+    finally:
+        collect.fetch_quote = real_fetch
+        collect.HORIZONS_S = real_horizons
+
+    rows = conn.execute(
+        "SELECT count(*) FROM quotes WHERE cascade_id IS NULL").fetchone()[0]
+    assert rows > 0, "control sampler wrote nothing"
+
+
+def test_control_sampler_does_not_block_on_each_follow_up():
+    """follow_up sleeps through every horizon, up to 900s.
+
+    Awaiting it would cap the control rate near 2.4/hour whatever per_hour
+    said, and would have looked exactly like the sampler working.
+    """
+    import asyncio
+    import sqlite3
+
+    import collect
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(collect.SCHEMA)
+    started = []
+
+    async def slow_fetch(client, venue, symbol):
+        started.append(time.time())
+        await asyncio.sleep(0.2)
+        return {"bid": 100.0, "ask": 100.1, "quoted_ts": 1.0}
+
+    real_fetch, real_horizons = collect.fetch_quote, collect.HORIZONS_S
+    collect.fetch_quote = slow_fetch
+    collect.HORIZONS_S = (5.0,)   # longer than the sampler window
+    try:
+        asyncio.run(collect.control_sampler(
+            conn, None, "bybit", {"BTCUSDT"},
+            deadline=time.time() + 0.3, per_hour=100_000.0))
+    finally:
+        collect.fetch_quote = real_fetch
+        collect.HORIZONS_S = real_horizons
+
+    assert len(started) > 1, (
+        "only one entry began; the sampler blocked on the first follow_up")
+
+
+def test_control_sampler_stops_at_the_deadline():
+    import asyncio
+    import sqlite3
+
+    import collect
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(collect.SCHEMA)
+    started = time.time()
+    asyncio.run(collect.control_sampler(
+        conn, None, "bybit", {"BTCUSDT"},
+        deadline=started - 1.0, per_hour=6.0))
+    assert time.time() - started < 1.0
+
+
+def test_control_rate_exceeds_the_measured_cascade_rate():
+    """The control must not be the binding constraint on the comparison."""
+    import collect
+
+    measured_cascades_per_hour = 20.0 / 24.0
+    assert collect.CONTROL_PER_HOUR > measured_cascades_per_hour * 3

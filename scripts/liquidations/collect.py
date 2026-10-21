@@ -422,9 +422,14 @@ async def fetch_quote(client, venue: str, symbol: str) -> dict | None:
         return None
 
 
-async def follow_up(conn: sqlite3.Connection, client, cascade_id: int,
+async def follow_up(conn: sqlite3.Connection, client, cascade_id: int | None,
                     venue: str, symbol: str, detected_ts: float) -> None:
-    """Record the entry quote and each horizon quote for one cascade."""
+    """Record the entry quote and each horizon quote.
+
+    cascade_id is None for a random control entry, which takes the identical
+    path on purpose: same offsets, same endpoint, same latency, so the only
+    difference between the two arms is when the clock started.
+    """
     for offset in (0.0, *HORIZONS_S):
         wait = detected_ts + offset - time.time()
         if wait > 0:
@@ -438,6 +443,50 @@ async def follow_up(conn: sqlite3.Connection, client, cascade_id: int,
             (cascade_id, symbol, offset, quote["bid"], quote["ask"],
              quote["quoted_ts"]))
         conn.commit()
+
+
+# Random control entries per hour. docs/LIQUIDATION_PLAN.md calls the control
+# "the point": crypto drifts, so a window that happened to rise makes every
+# long look clever, and only a random-entry baseline separates a cascade
+# effect from market direction. Set well above the ~20 cascades/day measured
+# so the control interval is the tighter of the two and never the binding
+# constraint on the comparison.
+CONTROL_PER_HOUR = 6.0
+
+
+async def control_sampler(conn: sqlite3.Connection, client, venue: str,
+                          symbols: set[str], deadline: float,
+                          per_hour: float = CONTROL_PER_HOUR) -> None:
+    """Record quote series at random times, with no cascade attached.
+
+    Entries are a Poisson process -- exponential waits -- so the sampling is
+    memoryless and cannot drift into any time-of-day pattern of its own. The
+    symbol is drawn uniformly; the analyser compares like with like and
+    reweights, because the cascade mix across symbols is not knowable now and
+    choosing it later from the data would be fitting.
+
+    These rows carry cascade_id NULL. They cannot be reconstructed after the
+    fact: no price history is stored anywhere, so a quote not taken at the
+    time is a quote that never existed.
+    """
+    pool = sorted(symbols) or ["BTCUSDT"]
+    running: set[asyncio.Task] = set()
+    while time.time() < deadline:
+        wait = random.expovariate(per_hour / 3600.0)
+        if time.time() + wait >= deadline:
+            break
+        await asyncio.sleep(wait)
+        # Spawned, never awaited. follow_up sleeps through every horizon, so
+        # awaiting it would block this loop for the longest one (900s) and
+        # cap the control rate near 2.4/hour whatever per_hour said -- an
+        # undercount that would have looked like the sampler simply working.
+        task = asyncio.create_task(
+            follow_up(conn, client, None, venue, random.choice(pool),
+                      time.time()))
+        running.add(task)
+        task.add_done_callback(running.discard)
+    if running:
+        await asyncio.gather(*running, return_exceptions=True)
 
 
 async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
@@ -474,12 +523,20 @@ async def run(conn: sqlite3.Connection, venue: str, symbols: set[str],
 
     print(f"streaming liquidations, cascade = ${min_usd:,.0f} in {window_s:.0f}s")
     print(f"symbols: {', '.join(sorted(symbols)) if symbols else 'ALL'}")
-    print(f"horizons: {', '.join(str(h) + 's' for h in HORIZONS_S)}\n")
+    print(f"horizons: {', '.join(str(h) + 's' for h in HORIZONS_S)}")
+    print(f"control entries: {CONTROL_PER_HOUR:.0f}/hour at random times\n")
 
     # Same reason as the websocket: force IPv4 for the quote fetches, since a
     # follow-up quote that times out costs a horizon we cannot go back for.
     transport = httpx.AsyncHTTPTransport(local_address="0.0.0.0")
     async with httpx.AsyncClient(transport=transport) as client:
+        # Outside the reconnect loop: the control arm must keep sampling
+        # through a dropped websocket, because a gap in the control that
+        # lines up with a gap in the cascades would make the two arms cover
+        # different market conditions and the comparison meaningless.
+        sampler = asyncio.create_task(
+            control_sampler(conn, client, venue, symbols, deadline))
+        tasks.add(sampler)
         while time.time() < deadline:
             try:
                 async with websockets.connect(
