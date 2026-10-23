@@ -63,13 +63,13 @@ SUSPEND_GAP_S = 300.0
 VENUES = {
     "binance": {
         "stream": "wss://fstream.binance.com/ws/!forceOrder@arr",
-        "book": "https://fapi.binance.com/fapi/v1/ticker/bookTicker",
+        "book": "https://fapi.binance.com/fapi/v1/depth",
         "probe": "https://fapi.binance.com/fapi/v1/ping",
         "subscribe": None,
     },
     "bybit": {
         "stream": "wss://stream.bybit.com/v5/public/linear",
-        "book": "https://api.bybit.com/v5/market/tickers",
+        "book": "https://api.bybit.com/v5/market/orderbook",
         "probe": "https://api.bybit.com/v5/market/time",
         # ONE topic. Subscribing to both names was meant to hedge against
         # the rename; instead Bybit can reject the whole batch when any
@@ -143,6 +143,13 @@ CREATE TABLE IF NOT EXISTS quotes (
     cascade_id INTEGER,
     control_id INTEGER,
     symbol TEXT NOT NULL,
+    -- JSON [[price, size], ...], best first. Top of book alone prices an
+    -- infinitesimal trade: the cross-exchange test looked viable at 1.62bp
+    -- top-of-book and died against a 36bp hurdle once the book was walked
+    -- for real size. The plan's second test needs a notional the book can
+    -- absorb, and depth cannot be reconstructed after the moment passes.
+    bids TEXT,
+    asks TEXT,
     -- seconds after the cascade was detected; 0 is the entry quote
     offset_s REAL NOT NULL,
     bid REAL,
@@ -179,6 +186,10 @@ def migrate(conn: sqlite3.Connection) -> list[str]:
     if cols and "control_id" not in cols:
         conn.execute("ALTER TABLE quotes ADD COLUMN control_id INTEGER")
         done.append("quotes.control_id")
+    for column in ("bids", "asks"):
+        if cols and column not in cols:
+            conn.execute(f"ALTER TABLE quotes ADD COLUMN {column} TEXT")
+            done.append(f"quotes.{column}")
     conn.commit()
     return done
 
@@ -428,27 +439,44 @@ def trade_direction(side: str) -> str:
     return "BUY" if side.upper() == "SELL" else "SELL"
 
 
-async def fetch_quote(client, venue: str, symbol: str) -> dict | None:
-    """Best bid and ask now. The spread is MEASURED, never assumed.
+BOOK_LEVELS = 50
 
-    A cascade is exactly when liquidity is worst, so assuming a normal spread
-    would be the most flattering error available -- the same shape as pricing
-    a memecoin from virtual reserves while the payout came from real ones.
+
+async def fetch_quote(client, venue: str, symbol: str) -> dict | None:
+    """The order book now: best bid and ask, and the depth behind them.
+
+    The spread is MEASURED, never assumed -- a cascade is exactly when
+    liquidity is worst, so a normal spread would be the most flattering
+    error available. Depth is recorded for the same reason one step out:
+    the best quote prices an infinitesimal trade, and any real size walks
+    the book. Reading the touch and calling it the cost is what made
+    cross-exchange arbitrage look alive at 1.62bp when the true hurdle was
+    36bp.
+
+    Level one of the book IS the best bid and ask, so this replaces the
+    ticker call rather than adding a second request.
     """
     url = VENUES[venue]["book"]
-    params = ({"category": "linear", "symbol": symbol} if venue == "bybit"
-              else {"symbol": symbol})
+    params = ({"category": "linear", "symbol": symbol, "limit": BOOK_LEVELS}
+              if venue == "bybit" else {"symbol": symbol,
+                                        "limit": BOOK_LEVELS})
     try:
         resp = await client.get(url, params=params, timeout=10.0)
         body = resp.json()
         if venue == "bybit":
-            row = ((body.get("result") or {}).get("list") or [{}])[0]
-            bid, ask = float(row["bid1Price"]), float(row["ask1Price"])
+            result = body.get("result") or {}
+            raw_bids, raw_asks = result.get("b") or [], result.get("a") or []
         else:
-            bid, ask = float(body["bidPrice"]), float(body["askPrice"])
-        if bid <= 0 or ask <= 0:
+            raw_bids, raw_asks = body.get("bids") or [], body.get("asks") or []
+        bids = [[float(p), float(q)] for p, q in raw_bids[:BOOK_LEVELS]]
+        asks = [[float(p), float(q)] for p, q in raw_asks[:BOOK_LEVELS]]
+        if not bids or not asks:
             return None
-        return {"bid": bid, "ask": ask, "quoted_ts": time.time()}
+        bid, ask = bids[0][0], asks[0][0]
+        if bid <= 0 or ask <= 0 or ask < bid:
+            return None
+        return {"bid": bid, "ask": ask, "quoted_ts": time.time(),
+                "bids": json.dumps(bids), "asks": json.dumps(asks)}
     except Exception:  # noqa: BLE001
         return None
 
@@ -471,9 +499,11 @@ async def follow_up(conn: sqlite3.Connection, client,
             continue
         conn.execute(
             "INSERT INTO quotes (cascade_id, control_id, symbol, offset_s, "
-            "bid, ask, quoted_ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "bid, ask, bids, asks, quoted_ts) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (cascade_id, control_id, symbol, offset, quote["bid"],
-             quote["ask"], quote["quoted_ts"]))
+             quote["ask"], quote.get("bids"), quote.get("asks"),
+             quote["quoted_ts"]))
         conn.commit()
 
 

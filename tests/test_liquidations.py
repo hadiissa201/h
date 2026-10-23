@@ -754,9 +754,61 @@ def test_migrate_adds_control_id_to_an_older_database():
                  " quoted_ts) VALUES (1,'BTCUSDT',0,1.0,1.1,1.0)")
     conn.commit()
 
-    assert collect.migrate(conn) == ["quotes.control_id"]
+    added = collect.migrate(conn)
+    assert "quotes.control_id" in added
+    # Depth too: top of book prices an infinitesimal trade, and the plan's
+    # second test needs a notional the book can absorb.
+    assert "quotes.bids" in added and "quotes.asks" in added
     cols = {r[1] for r in conn.execute("PRAGMA table_info(quotes)")}
-    assert "control_id" in cols
+    assert {"control_id", "bids", "asks"} <= cols
     kept = conn.execute("SELECT count(*) FROM quotes").fetchone()[0]
     assert kept == 1, "migration lost existing rows"
     assert collect.migrate(conn) == [], "migration is not idempotent"
+
+
+def test_fetch_quote_records_depth_not_just_the_touch():
+    """Top of book prices a trade of zero size.
+
+    Cross-exchange arbitrage looked alive at a 1.62bp top-of-book spread and
+    died against a 36bp hurdle once the book was walked for real size. Depth
+    cannot be reconstructed once the moment passes.
+    """
+    import asyncio
+    import json
+
+    import collect
+
+    class FakeResponse:
+        @staticmethod
+        def json():
+            return {"result": {
+                "b": [["100.0", "1.5"], ["99.9", "10.0"]],
+                "a": [["100.1", "2.0"], ["100.2", "8.0"]]}}
+
+    class FakeClient:
+        async def get(self, url, params=None, timeout=None):
+            return FakeResponse()
+
+    quote = asyncio.run(collect.fetch_quote(FakeClient(), "bybit", "BTCUSDT"))
+    assert quote["bid"] == 100.0 and quote["ask"] == 100.1
+    assert json.loads(quote["bids"])[1] == [99.9, 10.0]
+    assert json.loads(quote["asks"])[1] == [100.2, 8.0]
+
+
+def test_fetch_quote_rejects_a_crossed_book():
+    """ask below bid is impossible and would invert every spread."""
+    import asyncio
+
+    import collect
+
+    class FakeResponse:
+        @staticmethod
+        def json():
+            return {"result": {"b": [["100.5", "1.0"]], "a": [["100.0", "1.0"]]}}
+
+    class FakeClient:
+        async def get(self, url, params=None, timeout=None):
+            return FakeResponse()
+
+    assert asyncio.run(
+        collect.fetch_quote(FakeClient(), "bybit", "BTCUSDT")) is None
