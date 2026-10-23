@@ -691,3 +691,72 @@ def test_control_rate_exceeds_the_measured_cascade_rate():
 
     measured_cascades_per_hour = 20.0 / 24.0
     assert collect.CONTROL_PER_HOUR > measured_cascades_per_hour * 3
+
+
+def test_control_quotes_are_groupable_into_series():
+    """Overlapping control entries must be separable.
+
+    All-NULL cascade_id could not group them: a 900s series is still running
+    when the next starts, so their rows interleave.
+    """
+    import asyncio
+    import sqlite3
+
+    import collect
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript(collect.SCHEMA)
+
+    async def fake_fetch(client, venue, symbol):
+        return {"bid": 100.0, "ask": 100.1, "quoted_ts": time.time()}
+
+    real_fetch, real_horizons = collect.fetch_quote, collect.HORIZONS_S
+    collect.fetch_quote = fake_fetch
+    collect.HORIZONS_S = (0.02,)
+    try:
+        asyncio.run(collect.control_sampler(
+            conn, None, "bybit", {"BTCUSDT"},
+            deadline=time.time() + 0.3, per_hour=200_000.0))
+    finally:
+        collect.fetch_quote = real_fetch
+        collect.HORIZONS_S = real_horizons
+
+    series = conn.execute(
+        "SELECT count(DISTINCT control_id) FROM quotes "
+        "WHERE control_id IS NOT NULL").fetchone()[0]
+    assert series > 1, "control quotes cannot be told apart"
+    orphans = conn.execute(
+        "SELECT count(*) FROM quotes WHERE cascade_id IS NULL "
+        "AND control_id IS NULL").fetchone()[0]
+    assert orphans == 0, "a quote belongs to neither arm"
+
+
+def test_migrate_adds_control_id_to_an_older_database():
+    """CREATE TABLE IF NOT EXISTS never alters an existing table.
+
+    Without the migration the collector runs happily against the old shape,
+    writing control rows that look fine and cannot be grouped.
+    """
+    import sqlite3
+
+    import collect
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript("""
+        CREATE TABLE quotes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            cascade_id INTEGER,
+            symbol TEXT NOT NULL,
+            offset_s REAL NOT NULL,
+            bid REAL, ask REAL, quoted_ts REAL NOT NULL);
+    """)
+    conn.execute("INSERT INTO quotes (cascade_id, symbol, offset_s, bid, ask,"
+                 " quoted_ts) VALUES (1,'BTCUSDT',0,1.0,1.1,1.0)")
+    conn.commit()
+
+    assert collect.migrate(conn) == ["quotes.control_id"]
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(quotes)")}
+    assert "control_id" in cols
+    kept = conn.execute("SELECT count(*) FROM quotes").fetchone()[0]
+    assert kept == 1, "migration lost existing rows"
+    assert collect.migrate(conn) == [], "migration is not idempotent"

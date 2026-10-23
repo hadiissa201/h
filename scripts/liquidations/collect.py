@@ -128,16 +128,28 @@ CREATE TABLE IF NOT EXISTS sessions (
     reason TEXT
 );
 
+CREATE TABLE IF NOT EXISTS controls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    started_ts REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS quotes (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    cascade_id INTEGER,          -- NULL for the random control series
+    -- Exactly one of these is set. control_id exists because NULL alone
+    -- could not group control quotes into series: entries overlap, since a
+    -- 900s series is still running when the next begins, so their rows
+    -- interleave with nothing to tell them apart.
+    cascade_id INTEGER,
+    control_id INTEGER,
     symbol TEXT NOT NULL,
     -- seconds after the cascade was detected; 0 is the entry quote
     offset_s REAL NOT NULL,
     bid REAL,
     ask REAL,
     quoted_ts REAL NOT NULL,
-    FOREIGN KEY(cascade_id) REFERENCES cascades(id)
+    FOREIGN KEY(cascade_id) REFERENCES cascades(id),
+    FOREIGN KEY(control_id) REFERENCES controls(id)
 );
 CREATE INDEX IF NOT EXISTS ix_quote_cascade ON quotes(cascade_id, offset_s);
 """
@@ -154,10 +166,29 @@ class Burst:
     last_ts: float = 0.0
 
 
+def migrate(conn: sqlite3.Connection) -> list[str]:
+    """Bring an existing database up to the current schema, in place.
+
+    CREATE TABLE IF NOT EXISTS silently does nothing when the table already
+    exists, so a new column never appears on a database that predates it --
+    and the collector would keep running against the old shape, writing rows
+    that look fine and cannot be grouped. Returns what it changed.
+    """
+    done: list[str] = []
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(quotes)")}
+    if cols and "control_id" not in cols:
+        conn.execute("ALTER TABLE quotes ADD COLUMN control_id INTEGER")
+        done.append("quotes.control_id")
+    conn.commit()
+    return done
+
+
 def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(path)
     conn.executescript(SCHEMA)
+    for change in migrate(conn):
+        print(f"  migrated: added {change}")
     conn.commit()
     return conn
 
@@ -422,13 +453,14 @@ async def fetch_quote(client, venue: str, symbol: str) -> dict | None:
         return None
 
 
-async def follow_up(conn: sqlite3.Connection, client, cascade_id: int | None,
-                    venue: str, symbol: str, detected_ts: float) -> None:
+async def follow_up(conn: sqlite3.Connection, client,
+                    cascade_id: int | None, venue: str, symbol: str,
+                    detected_ts: float, control_id: int | None = None) -> None:
     """Record the entry quote and each horizon quote.
 
-    cascade_id is None for a random control entry, which takes the identical
-    path on purpose: same offsets, same endpoint, same latency, so the only
-    difference between the two arms is when the clock started.
+    A control entry passes control_id instead of cascade_id and takes the
+    identical path on purpose: same offsets, same endpoint, same latency, so
+    the only difference between the arms is when the clock started.
     """
     for offset in (0.0, *HORIZONS_S):
         wait = detected_ts + offset - time.time()
@@ -438,10 +470,10 @@ async def follow_up(conn: sqlite3.Connection, client, cascade_id: int | None,
         if quote is None:
             continue
         conn.execute(
-            "INSERT INTO quotes (cascade_id, symbol, offset_s, bid, ask, "
-            "quoted_ts) VALUES (?, ?, ?, ?, ?, ?)",
-            (cascade_id, symbol, offset, quote["bid"], quote["ask"],
-             quote["quoted_ts"]))
+            "INSERT INTO quotes (cascade_id, control_id, symbol, offset_s, "
+            "bid, ask, quoted_ts) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (cascade_id, control_id, symbol, offset, quote["bid"],
+             quote["ask"], quote["quoted_ts"]))
         conn.commit()
 
 
@@ -480,9 +512,15 @@ async def control_sampler(conn: sqlite3.Connection, client, venue: str,
         # awaiting it would block this loop for the longest one (900s) and
         # cap the control rate near 2.4/hour whatever per_hour said -- an
         # undercount that would have looked like the sampler simply working.
+        symbol = random.choice(pool)
+        started = time.time()
+        cursor = conn.execute(
+            "INSERT INTO controls (symbol, started_ts) VALUES (?, ?)",
+            (symbol, started))
+        conn.commit()
         task = asyncio.create_task(
-            follow_up(conn, client, None, venue, random.choice(pool),
-                      time.time()))
+            follow_up(conn, client, None, venue, symbol, started,
+                      control_id=cursor.lastrowid))
         running.add(task)
         task.add_done_callback(running.discard)
     if running:
