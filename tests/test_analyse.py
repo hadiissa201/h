@@ -214,3 +214,38 @@ def test_control_direction_follows_the_cascade_mix():
     mixed = [control_direction(i, 0.5) for i in range(400)]
     share = mixed.count("BUY") / len(mixed)
     assert 0.4 < share < 0.6, f"direction draw is skewed: {share:.2f}"
+
+
+def test_control_sample_size_is_a_precondition():
+    """A difference against three control entries is not a measurement.
+
+    The first live run showed a narrow-looking interval computed against a
+    control arm forty minutes old, with no n displayed for it.
+    """
+    from analyse import CONTROLS_NEEDED, check_preconditions
+
+    conn = make_db()
+    add_cascade(conn, 1, "BTCUSDT", "SELL", 1000.0, (100.0, 100.1),
+                (101.0, 101.1))
+    names = [n for n, _, _ in check_preconditions(conn, 1, {30.0: 1.0}, 3)]
+    assert any("control" in n for n in names)
+
+    failing = {n: ok for n, ok, _ in
+               check_preconditions(conn, 1, {30.0: 1.0}, 3)}
+    passing = {n: ok for n, ok, _ in
+               check_preconditions(conn, 1, {30.0: 1.0}, CONTROLS_NEEDED)}
+    key = next(n for n in failing if "control" in n)
+    assert failing[key] is False
+    assert passing[key] is True
+
+
+def test_tick_size_dominates_the_relative_spread():
+    """Why the spread report must be split by symbol.
+
+    BTC's $0.10 tick near $81,000 and SOL's $0.01 near $104 differ by about
+    a hundredfold in relative terms, so a pooled comparison of a BTC-heavy
+    cascade mix against uniform controls measures symbols, not liquidity.
+    """
+    btc = Trade(0.0, "BTCUSDT", "BUY", (81430.5, 81430.6), (81430.5, 81430.6))
+    sol = Trade(0.0, "SOLUSDT", "BUY", (103.61, 103.62), (103.61, 103.62))
+    assert btc.entry_spread < sol.entry_spread / 50

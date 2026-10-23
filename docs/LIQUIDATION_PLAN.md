@@ -104,7 +104,34 @@ is no cascade effect, only market direction.
    recorded per event. Above that, the entry price is not one we could have
    reached.
 
+5. At least **100 control entries**. Added 2026-10-23, after the first run
+   of the analyser.
+
 Failing a precondition means "not yet", which is a result rather than a delay.
+
+## Amendment, 2026-10-23: a size requirement for the control
+
+The original four preconditions set sizes for the cascade arm and none for
+the control, although the control is what the primary number is measured
+against. The first analyser run exposed that: the control sampler had been
+live for forty minutes, so a difference was computed and an interval printed
+against roughly three control entries, and the table displayed `n` for
+cascades only. At 60s it read `+0.086% [+0.032%, +0.142%]`, entirely above
+zero and indistinguishable in presentation from a real result.
+
+This is recorded here because the plan requires any change to be dated and
+explained. It differs from the memecoin crux amendment in direction: that one
+loosened a kill criterion after seeing data, in the direction favouring the
+strategy. This one adds a hurdle the plan omitted. It can only make a
+candidate harder to declare, never easier, and the number was fixed at the
+cascade arm's own 100 rather than chosen from what the data would clear.
+
+The control sampler itself was missing entirely until 2026-10-22 and is not
+an amendment but a defect: `docs/LIQUIDATION_PLAN.md` always required it,
+`follow_up` was simply never called for anything but cascades. The first 33
+hours of collection therefore have cascades and no control, and cannot be
+repaired, since no price history is stored. Any verdict must come from data
+collected after the control exists.
 
 ## What this will not answer
 

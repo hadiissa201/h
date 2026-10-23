@@ -45,6 +45,12 @@ ROUND_TRIP_FEES = 2 * TAKER_FEE
 CASCADES_NEEDED = 100
 DAYS_NEEDED = 20
 QUOTE_COVERAGE_NEEDED = 0.90
+# Added 2026-10-23. The plan requires a control but set no size for it, and
+# the first run computed a difference -- with a narrow-looking interval --
+# against three control entries, because the control sampler had been live
+# for forty minutes. This is a hurdle the plan omitted rather than one it
+# set, and it makes the test harder to pass, never easier.
+CONTROLS_NEEDED = 100
 MAX_MEDIAN_LATENCY_S = 2.0
 
 # Cascades cluster: the first live burst was three inside 140 seconds, one
@@ -274,7 +280,8 @@ def median_latency(conn: sqlite3.Connection) -> float | None:
 
 
 def check_preconditions(conn: sqlite3.Connection, total_cascades: int,
-                        coverage: dict[float, float]) -> list[tuple]:
+                        coverage: dict[float, float],
+                        total_controls: int) -> list[tuple]:
     """The plan's four, each as (name, pass, detail)."""
     days = distinct_days(conn)
     latency = median_latency(conn)
@@ -287,6 +294,8 @@ def check_preconditions(conn: sqlite3.Connection, total_cascades: int,
         ("follow-up quotes on 90% of cascades",
          worst_cov >= QUOTE_COVERAGE_NEEDED,
          f"worst horizon {worst_cov:.1%} of {QUOTE_COVERAGE_NEEDED:.0%}"),
+        ("at least 100 control entries", total_controls >= CONTROLS_NEEDED,
+         f"{total_controls} of {CONTROLS_NEEDED}"),
         ("median latency under 2s",
          latency is not None and latency < MAX_MEDIAN_LATENCY_S,
          "no liquidations" if latency is None else f"{latency:.2f}s"),
@@ -339,7 +348,10 @@ def main() -> int:
     print("=" * 70)
     print("PRECONDITIONS (docs/LIQUIDATION_PLAN.md)")
     print("=" * 70)
-    checks = check_preconditions(conn, total_cascades, coverage)
+    total_controls = conn.execute(
+        "SELECT count(*) FROM controls").fetchone()[0]
+    checks = check_preconditions(conn, total_cascades, coverage,
+                                 total_controls)
     for name, ok, detail in checks:
         print(f"  [{'PASS' if ok else 'FAIL'}]  {name}: {detail}")
     all_ok = all(ok for _, ok, _ in checks)
@@ -355,8 +367,8 @@ def main() -> int:
     print("  spreads, paid by entering at the ask and exiting at the bid")
     print(f"  cascade direction mix: {buy_fraction:.0%} buy, "
           f"{1 - buy_fraction:.0%} sell\n")
-    print(f"  {'horizon':>8}  {'n':>5}  {'cascade':>9}  {'control':>9}  "
-          f"{'difference':>10}  {'95% interval':>22}")
+    print(f"  {'horizon':>8}  {'casc n':>6}  {'ctrl n':>6}  {'cascade':>9}  "
+          f"{'control':>9}  {'difference':>10}  {'95% interval':>22}")
 
     intervals = {}
     for horizon in HORIZONS_S:
@@ -366,13 +378,14 @@ def main() -> int:
         interval = bootstrap_difference(trades, labels, controls, weights, rng)
         intervals[horizon] = interval
         if c_mean is None or k_mean is None:
-            print(f"  {horizon:>7.0f}s  {len(trades):>5}  "
+            print(f"  {horizon:>7.0f}s  {len(trades):>6}  {len(controls):>6}  "
                   f"{'--':>9}  {'--':>9}  {'--':>10}  {'--':>22}")
             continue
         span = (f"[{interval[0]:+.3%}, {interval[1]:+.3%}]"
                 if interval else "--")
-        print(f"  {horizon:>7.0f}s  {len(trades):>5}  {c_mean:>+9.3%}  "
-              f"{k_mean:>+9.3%}  {c_mean - k_mean:>+10.3%}  {span:>22}")
+        print(f"  {horizon:>7.0f}s  {len(trades):>6}  {len(controls):>6}  "
+              f"{c_mean:>+9.3%}  {k_mean:>+9.3%}  {c_mean - k_mean:>+10.3%}  "
+              f"{span:>22}")
 
     print("\n" + "=" * 70)
     print("WHAT THE SPREAD ACTUALLY COST")
@@ -380,14 +393,28 @@ def main() -> int:
     print("  The plan left this to measurement: a cascade is exactly when")
     print("  liquidity is worst, so assuming a normal spread would be the")
     print("  single most flattering error available.")
+    print("  Split by symbol, because tick size dominates the relative")
+    print("  spread: BTC's $0.10 tick near $81,000 is 0.0001%, SOL's $0.01")
+    print("  near $104 is 0.0096%. Pooled, a cascade mix weighted toward BTC")
+    print("  against controls drawn uniformly reads as cascades having far")
+    print("  TIGHTER spreads -- a comparison of symbols dressed as one of")
+    print("  liquidity, and in the flattering direction.\n")
     entry_trades = per_horizon[HORIZONS_S[0]][0]
     control_entry = per_horizon[HORIZONS_S[0]][3]
-    for label, group_ in (("at a cascade", entry_trades),
-                          ("at a random time", control_entry)):
-        if group_:
-            spreads = sorted(t.entry_spread for t in group_)
-            print(f"    {label:>18}: median {statistics.median(spreads):.4%}, "
-                  f"p90 {spreads[int(0.9 * (len(spreads) - 1))]:.4%}")
+    by_symbol: dict[str, dict[str, list[float]]] = defaultdict(
+        lambda: {"cascade": [], "control": []})
+    for t in entry_trades:
+        by_symbol[t.symbol]["cascade"].append(t.entry_spread)
+    for t in control_entry:
+        by_symbol[t.symbol]["control"].append(t.entry_spread)
+    print(f"    {'symbol':<10}{'cascade':>22}{'random':>22}")
+    for symbol in sorted(by_symbol):
+        cells = []
+        for arm in ("cascade", "control"):
+            vals = by_symbol[symbol][arm]
+            cells.append(f"{statistics.median(vals):.4%} (n={len(vals)})"
+                         if vals else "--")
+        print(f"    {symbol:<10}{cells[0]:>22}{cells[1]:>22}")
 
     print("\n" + "=" * 70)
     print("VERDICT")
