@@ -249,3 +249,34 @@ def test_tick_size_dominates_the_relative_spread():
     btc = Trade(0.0, "BTCUSDT", "BUY", (81430.5, 81430.6), (81430.5, 81430.6))
     sol = Trade(0.0, "SOLUSDT", "BUY", (103.61, 103.62), (103.61, 103.62))
     assert btc.entry_spread < sol.entry_spread / 50
+
+
+def test_a_real_effect_that_loses_money_is_not_a_candidate():
+    """The difference cancels costs; it cannot establish profitability.
+
+    The first full sample had three horizons with the difference clear of
+    zero and the cascade arm negative at all four. Calling that a candidate
+    would mean recommending a trade that loses on every execution.
+    """
+    assert verdict((0.0004, 0.0015), tradeable=False)[0] == (
+        "REAL BUT UNTRADEABLE")
+    assert verdict((0.0004, 0.0015), tradeable=True)[0] == "CANDIDATE"
+
+
+def test_tradeable_cannot_rescue_a_failing_difference():
+    """Beating costs is necessary, not sufficient: it must beat random too."""
+    assert verdict((-0.002, 0.003), tradeable=True)[0] == "UNPROVEN"
+    assert verdict((-0.004, -0.001), tradeable=True)[0] == "DEAD"
+
+
+def test_bootstrap_mean_measures_one_arm_alone():
+    import random as _r
+
+    from analyse import bootstrap_mean
+
+    losers = [Trade(float(i), "BTCUSDT", "BUY", (100.0, 100.1),
+                    (100.0, 100.1)) for i in range(20)]
+    interval = bootstrap_mean(losers, list(range(20)), {"BTCUSDT": 1.0},
+                              _r.Random(1), samples=500)
+    assert interval is not None
+    assert interval[1] < 0, "a flat market after costs must read negative"

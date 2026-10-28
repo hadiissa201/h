@@ -226,6 +226,40 @@ def group(trades: list[Trade]) -> dict[str, list[float]]:
     return out
 
 
+def bootstrap_mean(trades: list[Trade], labels: list[int],
+                   weights: dict[str, float], rng: random.Random,
+                   samples: int = BOOTSTRAP_SAMPLES
+                   ) -> tuple[float, float] | None:
+    """95% interval for one arm's own net return, resampled by episode.
+
+    Needed because the difference cannot answer whether a trade makes money.
+    Both arms are net of the same fees and a near-identical spread, so those
+    costs cancel in a subtraction: the pre-registered primary number is a
+    GROSS comparison wearing net clothing. An arm can lose money at every
+    horizon while the difference is comfortably above zero, which is exactly
+    what the first full sample showed.
+    """
+    if not trades:
+        return None
+    clusters: dict[int, list[Trade]] = defaultdict(list)
+    for trade, label in zip(trades, labels):
+        clusters[label].append(trade)
+    keys = list(clusters)
+    means: list[float] = []
+    for _ in range(samples):
+        drawn: list[Trade] = []
+        for _ in range(len(keys)):
+            drawn.extend(clusters[rng.choice(keys)])
+        value = weighted_mean(group(drawn), weights)
+        if value is not None:
+            means.append(value)
+    if not means:
+        return None
+    means.sort()
+    return (means[int(0.025 * len(means))],
+            means[min(len(means) - 1, int(0.975 * len(means)))])
+
+
 def bootstrap_difference(cascades: list[Trade], labels: list[int],
                          controls: list[Trade], weights: dict[str, float],
                          rng: random.Random,
@@ -302,16 +336,30 @@ def check_preconditions(conn: sqlite3.Connection, total_cascades: int,
     ]
 
 
-def verdict(interval: tuple[float, float] | None) -> tuple[str, str]:
-    """The plan's table, applied mechanically."""
+def verdict(interval: tuple[float, float] | None,
+            tradeable: bool | None = None) -> tuple[str, str]:
+    """The plan's table, applied mechanically, plus the cost check.
+
+    Amended 2026-10-28. The plan's table reads the difference alone, and the
+    difference cancels the costs carried by both arms, so it can sit well
+    above zero while the cascade arm loses money on every trade. The first
+    full sample was exactly that: three horizons clear of zero with the
+    cascade arm negative at all four. A candidate that cannot be traded at a
+    profit is not a candidate, so clearing the difference is now necessary
+    and not sufficient.
+    """
     if interval is None:
         return "NO DATA", "nothing to conclude"
     lo, hi = interval
-    if lo > 0:
-        return "CANDIDATE", "interval entirely above 0 -- go to the second test"
     if hi < 0:
         return "DEAD", "interval entirely below 0 -- stop"
-    return "UNPROVEN", "interval straddles 0 -- keep collecting, no money either way"
+    if lo <= 0:
+        return ("UNPROVEN",
+                "interval straddles 0 -- keep collecting, no money either way")
+    if tradeable is False:
+        return ("REAL BUT UNTRADEABLE",
+                "beats random, yet loses money after costs -- not a candidate")
+    return "CANDIDATE", "interval entirely above 0 -- go to the second test"
 
 
 def main() -> int:
@@ -388,6 +436,32 @@ def main() -> int:
               f"{span:>22}")
 
     print("\n" + "=" * 70)
+    print("COULD YOU ACTUALLY TRADE IT?")
+    print("=" * 70)
+    print("  The difference above subtracts one arm from the other, and both")
+    print("  carry the same fees and a near-identical spread, so the costs")
+    print("  CANCEL. That column is a gross comparison: it can be far above")
+    print("  zero while every trade in it loses money. This section asks the")
+    print("  other question -- is the cascade arm itself, after costs,")
+    print(f"  positive? Round trip costs {ROUND_TRIP_FEES:.3%} in fees plus")
+    print("  both spreads.\n")
+    print(f"  {'horizon':>8}  {'net per trade':>14}  {'95% interval':>24}  "
+          f"{'tradeable':>10}")
+    tradeable = {}
+    for horizon in HORIZONS_S:
+        trades, labels, _, _, _ = per_horizon[horizon]
+        own = bootstrap_mean(trades, labels, weights, rng)
+        mean = weighted_mean(group(trades), weights)
+        if mean is None or own is None:
+            print(f"  {horizon:>7.0f}s  {'--':>14}  {'--':>24}  {'--':>10}")
+            continue
+        ok = own[0] > 0
+        tradeable[horizon] = ok
+        span = f"[{own[0]:+.3%}, {own[1]:+.3%}]"
+        print(f"  {horizon:>7.0f}s  {mean:>+14.3%}  {span:>24}  "
+              f"{'YES' if ok else 'no':>10}")
+
+    print("\n" + "=" * 70)
     print("WHAT THE SPREAD ACTUALLY COST")
     print("=" * 70)
     print("  The plan left this to measurement: a cascade is exactly when")
@@ -427,8 +501,8 @@ def main() -> int:
         print("  exist to stop.")
         return 0
     for horizon in HORIZONS_S:
-        name, why = verdict(intervals[horizon])
-        print(f"  {horizon:>7.0f}s  {name:<10} {why}")
+        name, why = verdict(intervals[horizon], tradeable.get(horizon))
+        print(f"  {horizon:>7.0f}s  {name:<21} {why}")
     print("\n  All four horizons are reported above. The plan forbids")
     print("  selecting one afterwards and presenting it alone.")
     return 0

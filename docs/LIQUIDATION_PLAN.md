@@ -83,6 +83,42 @@ is no cascade effect, only market direction.
 | Straddles 0 | Unproven | Keep collecting, no money either way |
 | Entirely below 0 | Dead | Stop |
 
+## Amendment, 2026-10-28: the difference cannot establish profitability
+
+The primary number above is specified as net return per cascade trade minus
+the same for the control. Both arms are net of the same fees and, as measured,
+a near-identical spread within each symbol, so **those costs cancel in the
+subtraction**. The difference is therefore a gross comparison, and the table
+that reads it can print "Candidate" over a trade that loses money on every
+execution.
+
+That is not hypothetical. The first sample with all counts satisfied -- 201
+cascades, 738 controls, 9 days -- had the difference clear of zero at three
+horizons and the cascade arm negative at all four:
+
+| horizon | cascade | control | difference |
+|---|---|---|---|
+| 30s | -0.064% | -0.113% | +0.049% |
+| 60s | -0.017% | -0.112% | +0.095% |
+| 300s | -0.021% | -0.111% | +0.090% |
+| 900s | -0.031% | -0.104% | +0.073% |
+
+Backing the costs out at 60s: the cascade entry's gross move is about
++0.093% and random entry's about -0.002%. The reversion is real and is
+roughly 85% of the 0.110% round trip needed to capture it.
+
+So clearing the difference is now **necessary and not sufficient**. A
+horizon is a candidate only if the difference is entirely above zero AND the
+cascade arm's own net return is entirely above zero, each with a
+cluster-bootstrapped interval. A horizon that clears the first and fails the
+second is reported as REAL BUT UNTRADEABLE, which is a finding rather than a
+near miss.
+
+This is a specification error in the plan, found by reading the arithmetic
+of its own primary number, not a criterion changed because the result was
+unwelcome. Like the control-size precondition of 2026-10-23 it can only make
+a candidate harder to declare, never easier.
+
 ## The second test, only if the first is cleared
 
 1. **Does it survive out of sample?** Threshold and horizon fixed on the first
